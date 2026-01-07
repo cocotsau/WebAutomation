@@ -1,0 +1,10 @@
+PySide6
+APScheduler
+pyyaml
+selenium
+webdriver-manager
+requests
+pandas
+openpyxl
+ddddocr
+Pillow
