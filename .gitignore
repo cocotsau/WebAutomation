@@ -51,3 +51,26 @@ $RECYCLE.BIN/
 .Trashes
 .VolumeIcon.icns
 .com.apple.timemachine.donotpresent
+
+# Tests & Coverage
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+nosetests.xml
+*.cover
+*.py,cover
+
+# Packaging
+.eggs/
+*.egg-info/
+
+# Trae IDE
+.trae/
+
+# Local Saved Workflows
+workflows/

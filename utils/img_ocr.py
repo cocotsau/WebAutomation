@@ -1,6 +1,10 @@
 from io import BytesIO
 from PIL import Image
-import ddddocr
+
+try:
+    import ddddocr
+except ImportError:
+    ddddocr = None
 
 
 class ImgOcr:
@@ -15,6 +19,9 @@ class ImgOcr:
         
         :param show_ad: 是否显示广告（ddddocr参数）
         """
+        if ddddocr is None:
+            raise RuntimeError("OCR library 'ddddocr' (or its dependency 'onnxruntime') is not installed or failed to load. Please check your installation.")
+            
         self.ocr = ddddocr.DdddOcr(show_ad=show_ad)
 
     def recognize(self, img: Image.Image) -> str:

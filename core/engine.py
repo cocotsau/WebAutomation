@@ -2,6 +2,7 @@ import logging
 import time
 from typing import List, Dict, Any
 from core.action_base import ActionBase
+from core.flow_control import BreakLoopException, ContinueLoopException
 
 class Engine:
     """
@@ -30,6 +31,9 @@ class Engine:
         This is injected into context as '__runner__'.
         """
         for i, step in enumerate(steps_data):
+            # Skip disabled steps
+            if step.get("disabled"):
+                continue
             tool_name = step.get("tool_name")
             params = step.get("params", {})
             
@@ -47,6 +51,8 @@ class Engine:
                     if not success:
                         self.logger.error(f"Step {tool_name} failed.")
                         return False
+                except (BreakLoopException, ContinueLoopException):
+                    raise
                 except Exception as e:
                     self.logger.exception(f"Exception executing {tool_name}: {e}")
                     return False

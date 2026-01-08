@@ -1,5 +1,6 @@
 from typing import Dict, Any, List
 from core.action_base import ActionBase
+from core.flow_control import BreakLoopException, ContinueLoopException
 import time
 
 class LoopAction(ActionBase):
@@ -23,10 +24,16 @@ class LoopAction(ActionBase):
         print(f"[Loop] Starting loop {count} times.")
         for i in range(count):
             print(f"[Loop] Iteration {i+1}/{count}")
-            # Inject loop index into context if needed, e.g., 'loop_index'
             context['loop_index'] = i
-            if not runner(children, context):
-                return False
+            try:
+                if not runner(children, context):
+                    return False
+            except BreakLoopException:
+                print(f"[Loop] Break triggered at iteration {i+1}")
+                break
+            except ContinueLoopException:
+                print(f"[Loop] Continue triggered at iteration {i+1}")
+                continue
         
         return True
 
@@ -53,7 +60,6 @@ class ForEachAction(ActionBase):
         if not runner:
             return False
             
-        # Get list from context
         data_list = context.get(var_name, [])
         if not isinstance(data_list, list):
             print(f"[ForEach] Error: Variable '{var_name}' is not a list or not found.")
@@ -64,8 +70,15 @@ class ForEachAction(ActionBase):
             print(f"[ForEach] Item {i+1}: {item}")
             context[item_name] = item
             context['loop_index'] = i
-            if not runner(children, context):
-                return False
+            try:
+                if not runner(children, context):
+                    return False
+            except BreakLoopException:
+                print(f"[ForEach] Break triggered at index {i}")
+                break
+            except ContinueLoopException:
+                print(f"[ForEach] Continue triggered at index {i}")
+                continue
                 
         return True
 
@@ -88,7 +101,7 @@ class WhileAction(ActionBase):
         condition_expr = self.params.get("condition", "False")
         children = self.params.get("children", [])
         runner = context.get("__runner__")
-        max_loops = int(self.params.get("max_loops", 1000)) # Safety break
+        max_loops = int(self.params.get("max_loops", 1000))
 
         if not runner:
             return False
@@ -100,30 +113,142 @@ class WhileAction(ActionBase):
                 print("[While] Max loops reached, breaking.")
                 break
                 
-            # Evaluate condition
-            # WARNING: eval is dangerous. In a real app, use a safe expression parser.
-            # For this demo, we assume local trust.
             try:
-                # Make context variables available to eval
-                is_true = eval(condition_expr, {}, context)
+                result = eval(condition_expr, {}, context)
             except Exception as e:
                 print(f"[While] Condition error: {e}")
                 return False
                 
-            if not is_true:
-                print("[While] Condition false, ending loop.")
+            if not result:
                 break
                 
-            print(f"[While] Iteration {loops+1}")
-            if not runner(children, context):
-                return False
-            
             loops += 1
+            context['loop_index'] = loops - 1
             
+            try:
+                if not runner(children, context):
+                    return False
+            except BreakLoopException:
+                print("[While] Break triggered")
+                break
+            except ContinueLoopException:
+                print("[While] Continue triggered")
+                continue
+                
         return True
 
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "condition", "type": "str", "label": "Condition (Python expr)", "default": "True"},
-            {"name": "max_loops", "type": "int", "label": "Max Loops (Safety)", "default": 100}
+            {"name": "condition", "type": "str", "label": "Condition (Python Expr)", "default": "True"},
+            {"name": "max_loops", "type": "int", "label": "Max Loops (Safety)", "default": 1000}
         ]
+
+class BreakAction(ActionBase):
+    @property
+    def name(self) -> str: return "Break"
+    @property
+    def description(self) -> str: return "Breaks out of the current loop."
+    def execute(self, context: Dict[str, Any]) -> bool:
+        raise BreakLoopException()
+
+class ContinueAction(ActionBase):
+    @property
+    def name(self) -> str: return "Continue"
+    @property
+    def description(self) -> str: return "Skips to the next iteration of the current loop."
+    def execute(self, context: Dict[str, Any]) -> bool:
+        raise ContinueLoopException()
+
+class IfAction(ActionBase):
+    @property
+    def name(self) -> str: return "If"
+    @property
+    def description(self) -> str: return "Executes children if condition is true."
+    def execute(self, context: Dict[str, Any]) -> bool:
+        condition = self.params.get("condition", "False")
+        children = self.params.get("children", [])
+        runner = context.get("__runner__")
+        
+        try:
+            result = eval(condition, {}, context)
+        except Exception as e:
+            print(f"[If] Condition error: {e}")
+            result = False
+            
+        print(f"[If] Condition '{condition}' evaluated to {result}")
+        
+        if result and runner:
+            if not runner(children, context):
+                # We do not return False here if children fail? 
+                # If children fail, runner returns False. 
+                # Engine usually stops on failure.
+                # So we should return False too.
+                context['_last_if_result'] = bool(result)
+                return False
+                
+        context['_last_if_result'] = bool(result)
+        return True
+        
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [{"name": "condition", "type": "str", "label": "Condition (Python Expr)", "default": "True"}]
+
+class ElseIfAction(ActionBase):
+    @property
+    def name(self) -> str: return "ElseIf"
+    @property
+    def description(self) -> str: return "Executes children if previous conditions were false and this condition is true."
+    def execute(self, context: Dict[str, Any]) -> bool:
+        last_result = context.get('_last_if_result')
+        
+        if last_result:
+            print("[ElseIf] Skipped because previous block was True")
+            context['_last_if_result'] = True
+            return True
+            
+        condition = self.params.get("condition", "False")
+        children = self.params.get("children", [])
+        runner = context.get("__runner__")
+        
+        try:
+            result = eval(condition, {}, context)
+        except Exception as e:
+            print(f"[ElseIf] Condition error: {e}")
+            result = False
+            
+        print(f"[ElseIf] Condition '{condition}' evaluated to {result}")
+        
+        if result and runner:
+            if not runner(children, context):
+                context['_last_if_result'] = bool(result)
+                return False
+            
+        context['_last_if_result'] = bool(result)
+        return True
+
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [{"name": "condition", "type": "str", "label": "Condition (Python Expr)", "default": "True"}]
+
+class ElseAction(ActionBase):
+    @property
+    def name(self) -> str: return "Else"
+    @property
+    def description(self) -> str: return "Executes children if previous conditions were false."
+    def execute(self, context: Dict[str, Any]) -> bool:
+        last_result = context.get('_last_if_result')
+        
+        if last_result:
+            print("[Else] Skipped because previous block was True")
+            context['_last_if_result'] = True
+            return True
+            
+        print("[Else] Executing else block")
+        children = self.params.get("children", [])
+        runner = context.get("__runner__")
+        
+        if runner:
+            if not runner(children, context):
+                context['_last_if_result'] = True
+                return False
+            
+        context['_last_if_result'] = True
+        return True

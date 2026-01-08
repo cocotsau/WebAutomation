@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Dict, Any, List
 from PIL import Image
 
@@ -95,30 +96,66 @@ class WeChatNotifyAction(ActionBase):
     
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "key", "label": "Robot Key", "type": "string"},
-            {"name": "content", "label": "Message Content", "type": "string"},
-            {"name": "is_markdown", "label": "Use Markdown", "type": "bool"}
+            {"name": "key", "label": "机器人 Key", "type": "string"},
+            {"name": "content", "label": "消息内容", "type": "string"},
+            {"name": "is_markdown", "label": "使用 Markdown", "type": "bool", "advanced": True}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:
         key = self.params.get("key")
         content = self.params.get("content")
-        is_md = self.params.get("is_markdown", False)
+        is_markdown = self.params.get("is_markdown", False)
         
-        # Support variable substitution in content
-        # Simple substitution for now?
-        # Actually, the user might want to use {var} syntax.
-        # Let's try to format it using context.
-        try:
-            content = content.format(**context)
-        except:
-            pass # If format fails, use as is (e.g. key errors)
-            
         if not key or not content:
             return False
             
-        notifier = WeChatNotification(wechat_keys=key)
-        if is_md:
-            return notifier.send_markdown(content)
+        notifier = WeChatNotification(key)
+        if is_markdown:
+            notifier.send_markdown(content)
         else:
-            return notifier.send_text(content)
+            notifier.send_text(content)
+        return True
+
+class ExtractContentAction(ActionBase):
+    @property
+    def name(self) -> str:
+        return "从文本中提取内容"
+    
+    @property
+    def description(self) -> str:
+        return "使用正则表达式提取内容"
+    
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "text", "label": "目标文本", "type": "string"},
+            {"name": "pattern", "label": "正则表达式", "type": "string"},
+            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "extracted_content"}
+        ]
+    
+    def execute(self, context: Dict[str, Any]) -> bool:
+        text = self.params.get("text", "")
+        pattern = self.params.get("pattern", "")
+        output_var = self.params.get("output_variable", "extracted_content")
+        
+        # Support variable interpolation for text and pattern
+        try:
+            text = text.format(**context)
+        except:
+            pass
+            
+        try:
+            match = re.search(pattern, text)
+            if match:
+                result = match.group(0) # Default to full match
+                # If there are groups, use the first group
+                if match.groups():
+                    result = match.group(1)
+                context[output_var] = result
+                print(f"[ExtractContent] Found: {result}")
+            else:
+                context[output_var] = ""
+                print(f"[ExtractContent] No match found for pattern '{pattern}' in '{text[:20]}...'")
+            return True
+        except Exception as e:
+            print(f"[ExtractContent] Error: {e}")
+            return False

@@ -63,8 +63,8 @@ class ReadExcelAction(ActionBase):
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
             {"name": "alias", "label": "会话别名", "type": "string", "default": "default"},
-            {"name": "sheet_name", "label": "Sheet 名称 (空则使用当前)", "type": "string", "default": ""},
-            {"name": "read_type", "label": "读取类型", "type": "string", "default": "Cell"}, # Cell, Range, Sheet
+            {"name": "sheet_name", "label": "Sheet 名称 (空则当前)", "type": "string", "default": "", "advanced": True},
+            {"name": "read_type", "label": "读取类型", "type": "string", "default": "Cell", "options": ["Cell", "Range", "Sheet"]},
             {"name": "address", "label": "地址 (如 A1 或 A1:B2)", "type": "string", "default": "A1"},
             {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "excel_data"}
         ]
@@ -143,6 +143,51 @@ class ReadExcelAction(ActionBase):
             print(f"[ReadExcel] Error: {e}")
             return False
 
+class GetExcelRowCountAction(ActionBase):
+    @property
+    def name(self) -> str:
+        return "获取 Excel 总行数"
+    
+    @property
+    def description(self) -> str:
+        return "获取指定 Sheet 的总行数。"
+    
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "alias", "label": "会话别名", "type": "string", "default": "default"},
+            {"name": "sheet_name", "label": "Sheet 名称 (空则使用当前)", "type": "string", "default": ""},
+            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "row_count"}
+        ]
+    
+    def execute(self, context: Dict[str, Any]) -> bool:
+        alias = self.params.get("alias", "default")
+        sheet_name = self.params.get("sheet_name")
+        output_var = self.params.get("output_variable", "row_count")
+        
+        if alias not in EXCEL_SESSIONS:
+            print(f"[GetExcelRowCount] Session '{alias}' not found.")
+            return False
+            
+        wb = EXCEL_SESSIONS[alias]["wb"]
+        
+        try:
+            if sheet_name:
+                if sheet_name in wb.sheetnames:
+                    ws = wb[sheet_name]
+                else:
+                    print(f"[GetExcelRowCount] Sheet '{sheet_name}' not found.")
+                    return False
+            else:
+                ws = wb.active
+                
+            count = ws.max_row
+            context[output_var] = count
+            print(f"[GetExcelRowCount] Count: {count}")
+            return True
+        except Exception as e:
+            print(f"[GetExcelRowCount] Error: {e}")
+            return False
+
 class WriteExcelAction(ActionBase):
     @property
     def name(self) -> str:
@@ -155,8 +200,8 @@ class WriteExcelAction(ActionBase):
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
             {"name": "alias", "label": "会话别名", "type": "string", "default": "default"},
-            {"name": "sheet_name", "label": "Sheet 名称 (空则使用当前)", "type": "string", "default": ""},
-            {"name": "write_type", "label": "写入类型", "type": "string", "default": "Cell"}, # Cell, Range (start from)
+            {"name": "sheet_name", "label": "Sheet 名称 (空则当前)", "type": "string", "default": "", "advanced": True},
+            {"name": "write_type", "label": "写入类型", "type": "string", "default": "Cell", "options": ["Cell", "Range"]},
             {"name": "address", "label": "地址 (如 A1)", "type": "string", "default": "A1"},
             {"name": "value", "label": "写入值 (支持变量 {var})", "type": "string", "default": ""}
         ]
@@ -251,6 +296,72 @@ class WriteExcelAction(ActionBase):
             return True
         except Exception as e:
             print(f"[WriteExcel] Error: {e}")
+            return False
+
+class SaveExcelAction(ActionBase):
+    @property
+    def name(self) -> str:
+        return "保存 Excel"
+    
+    @property
+    def description(self) -> str:
+        return "保存 Excel 工作簿到文件。"
+    
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "alias", "label": "会话别名", "type": "string", "default": "default"},
+            {"name": "file_path", "label": "另存为路径 (空则覆盖原文件)", "type": "string", "default": ""}
+        ]
+    
+    def execute(self, context: Dict[str, Any]) -> bool:
+        alias = self.params.get("alias", "default")
+        new_path = self.params.get("file_path")
+        
+        if alias not in EXCEL_SESSIONS:
+            print(f"[SaveExcel] Session '{alias}' not found.")
+            return False
+            
+        session = EXCEL_SESSIONS[alias]
+        wb = session["wb"]
+        original_path = session["path"]
+        
+        save_path = new_path if new_path else original_path
+        
+        try:
+            wb.save(save_path)
+            print(f"[SaveExcel] Saved to {save_path}")
+            return True
+        except Exception as e:
+            print(f"[SaveExcel] Error: {e}")
+            return False
+
+class CloseExcelAction(ActionBase):
+    @property
+    def name(self) -> str:
+        return "关闭 Excel"
+    
+    @property
+    def description(self) -> str:
+        return "关闭 Excel 会话。"
+    
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "alias", "label": "会话别名", "type": "string", "default": "default"}
+        ]
+    
+    def execute(self, context: Dict[str, Any]) -> bool:
+        alias = self.params.get("alias", "default")
+        
+        if alias not in EXCEL_SESSIONS:
+            return True # Already closed or not exists
+            
+        try:
+            session = EXCEL_SESSIONS.pop(alias)
+            session["wb"].close()
+            print(f"[CloseExcel] Closed session '{alias}'")
+            return True
+        except Exception as e:
+            print(f"[CloseExcel] Error: {e}")
             return False
 
 class CloseExcelAction(ActionBase):
