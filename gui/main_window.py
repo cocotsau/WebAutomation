@@ -6,8 +6,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QListWidget, QTreeWidget, QTreeWidgetItem, 
                                QPushButton, QLabel, QMessageBox, QInputDialog, 
                                QMenu, QDialog, QFormLayout, QLineEdit, QComboBox, 
-                               QCheckBox, QAbstractItemView, QTabWidget)
-from PySide6.QtCore import Qt, QTimer
+                               QCheckBox, QAbstractItemView, QTabWidget, QStyledItemDelegate, QStyle, QStyleOptionViewItem)
+from PySide6.QtCore import Qt, QTimer, Signal, QSize
+from PySide6.QtGui import QPainter, QColor, QFont, QPen, QBrush
 from apscheduler.schedulers.qt import QtScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -126,6 +127,121 @@ class ParameterDialog(QDialog):
                 result[key] = inp.text()
         return result
 
+class WorkflowTreeWidget(QTreeWidget):
+    tool_dropped = Signal(str, object, int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.setDefaultDropAction(Qt.MoveAction)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+
+    def supportedDropActions(self):
+        return Qt.CopyAction | Qt.MoveAction
+
+    def dragEnterEvent(self, event):
+        if event.source() == self:
+            super().dragEnterEvent(event)
+        elif isinstance(event.source(), QTreeWidget):
+            # Call super to let QAbstractItemView handle state
+            super().dragEnterEvent(event)
+            event.setDropAction(Qt.CopyAction)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.source() == self:
+            super().dragMoveEvent(event)
+        elif isinstance(event.source(), QTreeWidget):
+            # Call super to update drop indicator
+            super().dragMoveEvent(event)
+            # Force CopyAction
+            event.setDropAction(Qt.CopyAction)
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        if event.source() == self:
+            super().dropEvent(event)
+        elif isinstance(event.source(), QTreeWidget):
+            item = event.source().currentItem()
+            # Ensure it is a tool (has parent)
+            if item.parent() is None:
+                event.ignore()
+                return
+            
+            tool_name = item.text(0)
+            target = self.itemAt(event.pos())
+            indicator = self.dropIndicatorPosition()
+            
+            self.tool_dropped.emit(tool_name, target, indicator)
+            event.acceptProposedAction()
+
+class StepItemDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.row_height = 56
+        self.margin_v = 10
+        self.margin_h = 12
+        self.radius = 10
+
+    def sizeHint(self, option, index):
+        base = super().sizeHint(option, index)
+        return QSize(base.width(), max(base.height(), self.row_height + self.margin_v))
+
+    def paint(self, painter, option, index):
+        # Prepare style option and derive text rect so we don't cover branch indicators
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+
+        painter.save()
+        painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+
+        # Compute text area rect from style, then add our padding
+        view = self.parent()
+        text_rect = view.style().subElementRect(QStyle.SE_ItemViewItemText, opt, view)
+        bg_rect = text_rect.adjusted(self.margin_h, self.margin_v // 2, -self.margin_h, -self.margin_v // 2)
+
+        # Card background
+        selected = bool(option.state & QStyle.State_Selected)
+        base_color = QColor("#F7F9FC") if not selected else QColor("#E8F0FE")
+        border_color = QColor("#E5EAF0") if not selected else QColor("#8AB4F8")
+        painter.setPen(QPen(border_color, 1))
+        painter.setBrush(QBrush(base_color))
+        painter.drawRoundedRect(bg_rect, self.radius, self.radius)
+
+        # Extract tool name and params from UserRole
+        data = index.data(Qt.UserRole) or {}
+        tool_name = str(data.get("tool_name", index.data(Qt.DisplayRole) or ""))
+        params = data.get("params", {})
+        params_text = str(params)
+
+        # Layout: title and subtitle
+        title_rect = bg_rect.adjusted(12, 8, -12, -26)
+        subtitle_rect = bg_rect.adjusted(12, 28, -12, -8)
+
+        # Draw title (tool name) bold
+        title_font = option.font
+        title_font.setPointSize(title_font.pointSize() + 1)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor("#111827"))
+        # Elide title if too long
+        fm_title = painter.fontMetrics()
+        elided_title = fm_title.elidedText(tool_name, Qt.ElideRight, title_rect.width())
+        painter.drawText(title_rect, Qt.AlignVCenter | Qt.TextSingleLine, elided_title)
+
+        # Draw subtitle (params) smaller and elided
+        subtitle_font = option.font
+        painter.setFont(subtitle_font)
+        painter.setPen(QColor("#4B5563"))
+        fm_sub = painter.fontMetrics()
+        elided_params = fm_sub.elidedText(params_text, Qt.ElideRight, subtitle_rect.width())
+        painter.drawText(subtitle_rect, Qt.AlignVCenter | Qt.TextSingleLine, elided_params)
+
+        painter.restore()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -155,16 +271,21 @@ class MainWindow(QMainWindow):
         
         self.toolbox_tree = QTreeWidget()
         self.toolbox_tree.setHeaderLabel("可用工具")
+        self.toolbox_tree.setDragEnabled(True)
+        self.toolbox_tree.setDragDropMode(QAbstractItemView.DragOnly)
         self.toolbox_tree.itemDoubleClicked.connect(self.add_tool_to_workflow)
         
         # Populate Toolbox
         for category, tools in TOOL_CATEGORIES.items():
             cat_item = QTreeWidgetItem([category])
-            cat_item.setFlags(cat_item.flags() & ~Qt.ItemIsSelectable)
+            # Disable selection and dragging for categories
+            cat_item.setFlags(cat_item.flags() & ~Qt.ItemIsSelectable & ~Qt.ItemIsDragEnabled)
             
             for tool_name in tools.keys():
                 tool_item = QTreeWidgetItem([tool_name])
                 tool_item.setData(0, Qt.UserRole, "tool")
+                # Ensure tools are draggable
+                tool_item.setFlags(tool_item.flags() | Qt.ItemIsDragEnabled)
                 cat_item.addChild(tool_item)
             
             self.toolbox_tree.addTopLevelItem(cat_item)
@@ -182,13 +303,17 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout()
         right_layout.addWidget(QLabel("<b>流程步骤</b> (拖拽排序/嵌套，右键编辑)"))
         
-        self.workflow_tree = QTreeWidget()
+        self.workflow_tree = WorkflowTreeWidget()
         self.workflow_tree.setHeaderLabel("步骤")
-        self.workflow_tree.setDragDropMode(QAbstractItemView.InternalMove)
-        self.workflow_tree.setDefaultDropAction(Qt.MoveAction)
+        # self.workflow_tree.setDragDropMode(QAbstractItemView.InternalMove) # Handled in class
+        # self.workflow_tree.setDefaultDropAction(Qt.MoveAction)
         self.workflow_tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.workflow_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.workflow_tree.customContextMenuRequested.connect(self.show_context_menu)
+        self.workflow_tree.tool_dropped.connect(self.handle_tool_drop)
+        self.workflow_tree.setItemDelegate(StepItemDelegate(self.workflow_tree))
+        self.workflow_tree.setUniformRowHeights(False)
+        self.workflow_tree.setStyleSheet("QTreeView { outline: none; } QTreeView::item:selected { background: transparent; }")
         
         right_layout.addWidget(self.workflow_tree)
         
@@ -205,12 +330,16 @@ class MainWindow(QMainWindow):
         self.btn_schedule.clicked.connect(self.toggle_schedule)
         
         self.btn_clear = QPushButton("清空步骤")
-        self.btn_clear.clicked.connect(self.workflow_tree.clear)
+        self.btn_clear.clicked.connect(self.confirm_clear_workflow)
+        self.btn_undo = QPushButton("撤销操作")
+        self.btn_undo.setEnabled(False)
+        self.btn_undo.clicked.connect(self.perform_undo)
         
         btn_layout.addWidget(self.btn_save)
         btn_layout.addWidget(self.btn_run)
         btn_layout.addWidget(self.btn_schedule)
         btn_layout.addWidget(self.btn_clear)
+        btn_layout.addWidget(self.btn_undo)
         right_layout.addLayout(btn_layout)
         
         # Status Bar
@@ -219,6 +348,40 @@ class MainWindow(QMainWindow):
         
         main_layout.addLayout(right_layout, 2)
 
+    def create_undo_snapshot(self):
+        self.undo_snapshot = self.get_workflow_data()
+        self.btn_undo.setEnabled(True)
+
+    def perform_undo(self):
+        snapshot = getattr(self, "undo_snapshot", None)
+        if not snapshot:
+            QMessageBox.information(self, "提示", "没有可撤销的内容。")
+            return
+        
+        # Save current state as redo? (Optional, but let's stick to simple undo for now)
+        # Or better, just restore.
+        
+        self.workflow_tree.clear()
+        self.load_workflow_to_tree(snapshot)
+        self.undo_snapshot = None
+        self.btn_undo.setEnabled(False)
+        self.status_label.setText("已撤销上一步操作。")
+
+    def confirm_clear_workflow(self):
+        if self.workflow_tree.topLevelItemCount() == 0:
+            QMessageBox.information(self, "提示", "当前没有步骤可清空。")
+            return
+        res = QMessageBox.question(self, "确认清空", "确定清空所有步骤？此操作会删除当前编辑内容。", QMessageBox.Yes | QMessageBox.No)
+        if res != QMessageBox.Yes:
+            return
+        text, ok = QInputDialog.getText(self, "二次确认", "请输入“清空”以继续：")
+        if not ok or text.strip() != "清空":
+            QMessageBox.information(self, "已取消", "未通过二次确认，已取消清空。")
+            return
+            
+        self.create_undo_snapshot()
+        self.workflow_tree.clear()
+        self.status_label.setText("已清空，可撤销。")
     def init_saved_workflows_tab(self):
         self.saved_tab = QWidget()
         layout = QVBoxLayout(self.saved_tab)
@@ -384,6 +547,7 @@ class MainWindow(QMainWindow):
             children = params.pop("children", None)
             
             tree_item = QTreeWidgetItem([f"{tool_name}: {params}"])
+            tree_item.setFlags(tree_item.flags() | Qt.ItemIsDropEnabled)
             # Put params back into data (without children for display/storage consistency, 
             # though children are stored in params in get_workflow_data, 
             # but when loaded we need to handle them recursively)
@@ -403,6 +567,69 @@ class MainWindow(QMainWindow):
                 
             if children:
                 self.load_workflow_to_tree(children, tree_item)
+
+    def handle_tool_drop(self, tool_name, target_item, indicator):
+        # 1. Get Params
+        action_class = ENGINE_REGISTRY.get(tool_name)
+        if not action_class:
+            return
+            
+        params = {}
+        action_instance = action_class()
+        schema = action_instance.get_param_schema()
+        if schema:
+            dlg = ParameterDialog(tool_name, schema, parent=self)
+            if dlg.exec():
+                params = dlg.get_params()
+            else:
+                return # Cancelled
+        
+        # 2. Create Item
+        tree_item = QTreeWidgetItem([f"{tool_name}: {params}"])
+        tree_item.setData(0, Qt.UserRole, {"tool_name": tool_name, "params": params})
+        tree_item.setFlags(tree_item.flags() | Qt.ItemIsDropEnabled)
+        
+        # 3. Insert Item
+        if not target_item:
+            self.workflow_tree.addTopLevelItem(tree_item)
+            return
+
+        if indicator == QAbstractItemView.OnViewport:
+             self.workflow_tree.addTopLevelItem(tree_item)
+             return
+             
+        if indicator == QAbstractItemView.OnItem:
+            target_data = target_item.data(0, Qt.UserRole)
+            target_name = target_data.get("tool_name")
+            if target_name in ["For循环", "Foreach循环", "While循环"]:
+                target_item.addChild(tree_item)
+                target_item.setExpanded(True)
+            else:
+                parent = target_item.parent()
+                if parent:
+                    idx = parent.indexOfChild(target_item)
+                    parent.insertChild(idx + 1, tree_item)
+                else:
+                    idx = self.workflow_tree.indexOfTopLevelItem(target_item)
+                    self.workflow_tree.insertTopLevelItem(idx + 1, tree_item)
+        
+        elif indicator == QAbstractItemView.AboveItem:
+            parent = target_item.parent()
+            if parent:
+                idx = parent.indexOfChild(target_item)
+                parent.insertChild(idx, tree_item)
+            else:
+                idx = self.workflow_tree.indexOfTopLevelItem(target_item)
+                self.workflow_tree.insertTopLevelItem(idx, tree_item)
+                
+        elif indicator == QAbstractItemView.BelowItem:
+            parent = target_item.parent()
+            if parent:
+                idx = parent.indexOfChild(target_item)
+                parent.insertChild(idx + 1, tree_item)
+            else:
+                idx = self.workflow_tree.indexOfTopLevelItem(target_item)
+                self.workflow_tree.insertTopLevelItem(idx + 1, tree_item)
 
     def add_tool_to_workflow(self, item, column):
         # Only add if it's a tool (has parent)
@@ -432,6 +659,7 @@ class MainWindow(QMainWindow):
         # Create Tree Item
         tree_item = QTreeWidgetItem([f"{tool_name}: {params}"])
         tree_item.setData(0, Qt.UserRole, {"tool_name": tool_name, "params": params})
+        tree_item.setFlags(tree_item.flags() | Qt.ItemIsDropEnabled)
         
         # Determine where to add
         selected_items = self.workflow_tree.selectedItems()
@@ -468,12 +696,14 @@ class MainWindow(QMainWindow):
         action = menu.exec(self.workflow_tree.mapToGlobal(pos))
         
         if action == delete_action:
+            self.create_undo_snapshot()
             parent = item.parent()
             if parent:
                 parent.removeChild(item)
             else:
                 index = self.workflow_tree.indexOfTopLevelItem(item)
                 self.workflow_tree.takeTopLevelItem(index)
+            self.status_label.setText("已删除步骤，可撤销。")
         elif action == edit_action:
             self.edit_step(item)
 
