@@ -83,6 +83,23 @@ class Web:
             raise
 
     @staticmethod
+    def wait_all_elements_hide(driver, locator: tuple, timeout: int = 20):
+        print(f"等待所有元素隐藏: {locator[0]}='{locator[1]}', 超时: {timeout}秒")
+        try:
+            def _all_hidden(d):
+                elements = d.find_elements(*locator)
+                for e in elements:
+                    if e.is_displayed():
+                        return False
+                return True
+            WebDriverWait(driver, timeout).until(_all_hidden)
+            print(f"所有元素隐藏成功: {locator[0]}='{locator[1]}'")
+            return True
+        except Exception as e:
+            print(f"所有元素隐藏失败: {locator[0]}='{locator[1]}', 错误: {e}")
+            raise
+
+    @staticmethod
     def wait_element_clickable(driver, locator: tuple, timeout: int = 20):
         print(f"等待元素可点击: {locator[0]}='{locator[1]}', 超时: {timeout}秒")
         try:
@@ -94,9 +111,18 @@ class Web:
             raise
 
     @staticmethod
-    def element_hover(driver, element):
-        print("执行鼠标悬停操作")
-        ActionChains(driver).move_to_element(element).perform()
+    def element_hover(driver, element, offset_x: int = 0, offset_y: int = 0):
+        print(f"执行鼠标悬停操作 (偏移: {offset_x}, {offset_y})")
+        if offset_x != 0 or offset_y != 0:
+            size = element.size
+            width = size['width']
+            height = size['height']
+            # Calculate target relative to top-left of element
+            target_x = int(width / 2) + offset_x
+            target_y = int(height / 2) + offset_y
+            ActionChains(driver).move_to_element_with_offset(element, target_x, target_y).perform()
+        else:
+            ActionChains(driver).move_to_element(element).perform()
         print("鼠标悬停完成")
 
     

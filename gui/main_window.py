@@ -18,16 +18,25 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from core.engine import Engine
 from core.workflow_manager import WorkflowManager
+from core.element_manager import ElementManager
 from tools.basic_tools import PrintLogAction, DelayAction, SetVariableAction
 from tools.web_tools import (OpenBrowserAction, CloseBrowserAction, ClickElementAction, 
-                             InputTextAction, GoToUrlAction, GetTextAction,
+                             InputTextAction, GoToUrlAction, GetElementInfoAction,
                              HoverElementAction, SwitchFrameAction, ScrollToElementAction, SwitchWindowAction,
-                             DrawMousePathAction, HttpDownloadAction)
+                             DrawMousePathAction, HttpDownloadAction,
+                             SaveElementAction,
+                             WaitElementAction, WaitAllElementsAction)
 from tools.logic_tools import (LoopAction, ForEachAction, WhileAction, 
                                IfAction, ElseIfAction, ElseAction, 
                                BreakAction, ContinueAction)
 from tools.util_tools import (WaitForFileAndCopyAction, ClearDirectoryAction, OCRImageAction, WeChatNotifyAction)
 from tools.excel_tools import (OpenExcelAction, ReadExcelAction, WriteExcelAction, CloseExcelAction, GetExcelRowCountAction, SaveExcelAction)
+from gui.widget_factory import WidgetFactory
+
+try:
+    from config import browser_config
+except ImportError:
+    browser_config = None
 
 # Categorized Registry
 TOOL_CATEGORIES = {
@@ -42,13 +51,16 @@ TOOL_CATEGORIES = {
         "跳转链接": GoToUrlAction,
         "点击元素": ClickElementAction,
         "输入文本": InputTextAction,
-        "获取文本": GetTextAction,
-        "悬停元素": HoverElementAction,
+        "获取元素信息": GetElementInfoAction,
+        "保存元素": SaveElementAction,
+        "悬停在元素上方": HoverElementAction,
         "滚动到元素": ScrollToElementAction,
         "切换 iFrame": SwitchFrameAction,
         "切换窗口": SwitchWindowAction,
         "绘制鼠标轨迹": DrawMousePathAction,
         "HTTP 下载": HttpDownloadAction,
+        "等待元素": WaitElementAction,
+        "等待全部元素": WaitAllElementsAction,
         "关闭浏览器": CloseBrowserAction
     },
     "Excel 工具": {
@@ -96,14 +108,16 @@ for cat, tools in TOOL_CATEGORIES.items():
 LOGIC_TOOLS = ["For循环", "Foreach循环", "While循环", "If 条件", "Else If 条件", "Else 否则"]
 
 class ParameterDialog(QDialog):
-    def __init__(self, tool_name, schema, current_params=None, parent=None, scope_anchor=None):
+    def __init__(self, tool_name, schema, current_params=None, parent=None, scope_anchor=None, extra_context=None):
         super().__init__(parent)
         self.setWindowTitle(f"配置 {tool_name}")
         self.schema = schema
         self.params = current_params or {}
         self.inputs = {}
+        self.dependencies = []
         self.resize(480, 420)
         self.scope_anchor = scope_anchor
+        self.extra_context = extra_context or {}
         tab_widget = QTabWidget()
         basic_tab = QWidget()
         advanced_tab = QWidget()
@@ -111,44 +125,39 @@ class ParameterDialog(QDialog):
         tab_widget.addTab(advanced_tab, "高级设置")
         basic_layout = QFormLayout(basic_tab)
         advanced_layout = QFormLayout(advanced_tab)
-        def make_fx_row(inp_widget):
-            container = QWidget()
-            h = QHBoxLayout(container)
-            h.setContentsMargins(0,0,0,0)
-            h.setSpacing(6)
-            h.addWidget(inp_widget)
-            fx_btn = QPushButton("fx")
-            fx_btn.setFixedWidth(36)
-            fx_btn.clicked.connect(lambda: self.open_variable_picker(inp_widget))
-            h.addWidget(fx_btn)
-            return container
+
+        def get_context():
+            if self.parent() and hasattr(self.parent(), "gather_context_variables_scoped"):
+                return self.parent().gather_context_variables_scoped(self.scope_anchor)
+            return {}
+
+        def open_var_picker(target_widget):
+            WidgetFactory.open_variable_picker(self, target_widget, get_context)
+
         for field in schema:
             key = field['name']
             label = field.get('label', key)
             default = field.get('default', '')
             val = self.params.get(key, default)
             target_layout = basic_layout if not field.get('advanced', False) else advanced_layout
-            if 'options' in field and isinstance(field['options'], list):
-                inp = QComboBox()
-                for opt in field['options']:
-                    inp.addItem(str(opt))
-                if str(val) in [str(o) for o in field['options']]:
-                    inp.setCurrentText(str(val))
-            elif field['type'] == 'bool':
-                inp = QCheckBox()
-                inp.setChecked(bool(val))
-            elif field['type'] in ('int', 'float'):
-                inp = QLineEdit(str(val))
-            elif field['type'] in ('text',):
-                inp = QTextEdit(str(val))
-                inp.setFixedHeight(60)
-            else:
-                inp = QLineEdit(str(val))
+            
+            inp = WidgetFactory.create_widget(field, val, self, get_context, tool_name)
+            
+            # Wrap with tools (browse, fx) if necessary
+            # We assume WidgetFactory handles basic widget creation, 
+            # and we wrap it if it's text-based or needs browse button.
+            # But WidgetFactory.create_widget returns just the widget.
+            
+            final_widget = inp
             if isinstance(inp, (QLineEdit, QTextEdit)):
-                target_layout.addRow(label + ":", make_fx_row(inp))
-            else:
-                target_layout.addRow(label + ":", inp)
+                final_widget = WidgetFactory.wrap_with_tools(inp, field, self, open_var_picker, extra_context=self.extra_context)
+            
+            target_layout.addRow(label + ":", final_widget)
             self.inputs[key] = (inp, field['type'])
+            
+            if 'enable_if' in field:
+                self.dependencies.append((key, field['enable_if']))
+
         main_layout = QVBoxLayout(self)
         main_layout.addWidget(tab_widget)
         btn_layout = QHBoxLayout()
@@ -162,51 +171,131 @@ class ParameterDialog(QDialog):
         btn_layout.addWidget(cancel_btn)
         btn_layout.addWidget(ok_btn)
         main_layout.addLayout(btn_layout)
-    def open_variable_picker(self, target_widget):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("选择流程变量")
-        v = QVBoxLayout(dlg)
-        search = QLineEdit()
-        v.addWidget(search)
-        lst = QListWidget()
-        avail = []
-        try:
-            if self.parent() and hasattr(self.parent(), "gather_context_variables_scoped"):
-                avail = self.parent().gather_context_variables_scoped(self.scope_anchor)
-        except:
-            pass
-        for name in sorted(set(avail)):
-            lst.addItem(name)
-        v.addWidget(lst)
-        hl = QHBoxLayout()
-        btn_ok = QPushButton("确认")
-        btn_cancel = QPushButton("取消")
-        hl.addStretch()
-        hl.addWidget(btn_cancel)
-        hl.addWidget(btn_ok)
-        v.addLayout(hl)
-        def apply_selected():
-            item = lst.currentItem()
-            if not item:
-                dlg.reject()
-                return
-            var = item.text()
-            text = f"{{{var}}}"
-            if isinstance(target_widget, QLineEdit):
-                target_widget.setText(text)
-            elif isinstance(target_widget, QTextEdit):
-                target_widget.setPlainText(text)
-            dlg.accept()
-        btn_ok.clicked.connect(apply_selected)
-        btn_cancel.clicked.connect(dlg.reject)
-        def filter_list(t):
-            lst.clear()
-            for name in sorted(set(avail)):
-                if t.strip().lower() in name.lower():
-                    lst.addItem(name)
-        search.textChanged.connect(filter_list)
-        lst.itemDoubleClicked.connect(lambda _: apply_selected())
-        dlg.exec()
+        self.setup_dependencies()
+        self.setup_special_handlers()
+
+    def setup_dependencies(self):
+        for key, (inp, type_str) in self.inputs.items():
+            if isinstance(inp, QCheckBox):
+                inp.stateChanged.connect(self.check_dependencies)
+            elif isinstance(inp, QComboBox):
+                inp.currentTextChanged.connect(self.check_dependencies)
+            elif isinstance(inp, QLineEdit):
+                inp.textChanged.connect(self.check_dependencies)
+        self.check_dependencies()
+
+    def check_dependencies(self):
+        for target_key, conditions in self.dependencies:
+            if target_key not in self.inputs:
+                continue
+            
+            target_widget, _ = self.inputs[target_key]
+            # Since target_widget might be wrapped in a container (make_fx_row)
+            # we need to find the container if we want to hide the whole row?
+            # But here we just setEnabled on the widget itself.
+            # The label will remain enabled, which is standard behavior.
+            
+            enabled = True
+            for src_key, required_val in conditions.items():
+                if src_key not in self.inputs:
+                    continue
+                
+                src_widget, src_type = self.inputs[src_key]
+                current_val = None
+                
+                if isinstance(src_widget, QCheckBox):
+                    current_val = src_widget.isChecked()
+                elif isinstance(src_widget, QComboBox):
+                    current_val = src_widget.currentText()
+                elif isinstance(src_widget, QLineEdit):
+                    current_val = src_widget.text()
+                    if src_type == 'int':
+                        try:
+                            current_val = int(current_val)
+                        except:
+                            pass
+                    elif src_type == 'float':
+                        try:
+                            current_val = float(current_val)
+                        except:
+                            pass
+                
+                if current_val != required_val:
+                    enabled = False
+                    break
+            
+            target_widget.setEnabled(enabled)
+
+    def setup_special_handlers(self):
+        # Special logic for Open Browser: use_local_profile
+        if "use_local_profile" in self.inputs and "user_data_dir" in self.inputs:
+            chk, _ = self.inputs["use_local_profile"]
+            udp_widget, _ = self.inputs["user_data_dir"]
+            
+            # Find browser_type input if exists
+            browser_type_widget = None
+            if "browser_type" in self.inputs:
+                browser_type_widget, _ = self.inputs["browser_type"]
+
+            def update_udp_state():
+                checked = chk.isChecked()
+                path_found = False
+                
+                # Determine browser type
+                b_type = "chrome"
+                if browser_type_widget and isinstance(browser_type_widget, QComboBox):
+                    b_type = browser_type_widget.currentText()
+                
+                if checked and browser_config and hasattr(browser_config, 'data_dir'):
+                    path = browser_config.data_dir.get(b_type, "")
+                    if path:
+                        path_found = True
+                        if isinstance(udp_widget, QLineEdit):
+                            udp_widget.setText(path)
+                
+                # Update UI state
+                # If checked and using default path -> ReadOnly + Disabled Browse
+                # If checked but no default path found -> Editable? Or empty?
+                # User said: "cannot modify when using default directory, can modify when custom directory"
+                # "Custom directory" implies maybe unchecking? Or maybe if checked but I want to change it?
+                # If I want to change it, I'm NOT using "default directory" anymore, so I should probably uncheck "Use Local Profile" 
+                # OR "Use Local Profile" means "Use THE local profile", so if I want custom, I uncheck it.
+                # So if Checked -> ReadOnly.
+                
+                # Wait, user said "custom directory when mutable". 
+                # This implies there is a state where I can input custom directory.
+                # If "Use Local Profile" is checked, it forces the local profile.
+                # If unchecked, I can enter whatever I want (custom).
+                # So: Checked -> ReadOnly (and auto-filled). Unchecked -> Editable.
+                
+                if checked and path_found:
+                    if isinstance(udp_widget, QLineEdit):
+                        udp_widget.setReadOnly(True)
+                        udp_widget.setStyleSheet("background-color: #F5F7FA; color: #909399;")
+                    
+                    # Disable browse button
+                    if udp_widget.parent():
+                        for child in udp_widget.parent().findChildren(QPushButton):
+                            if child.text() == "...":
+                                child.setEnabled(False)
+                else:
+                    if isinstance(udp_widget, QLineEdit):
+                        udp_widget.setReadOnly(False)
+                        udp_widget.setStyleSheet("")
+                    
+                    # Enable browse button
+                    if udp_widget.parent():
+                        for child in udp_widget.parent().findChildren(QPushButton):
+                            if child.text() == "...":
+                                child.setEnabled(True)
+
+            chk.stateChanged.connect(update_udp_state)
+            if browser_type_widget and isinstance(browser_type_widget, QComboBox):
+                browser_type_widget.currentTextChanged.connect(update_udp_state)
+            
+            # Initial call if checked (it defaults to False, so this might not do much unless default is True)
+            # But we should call it to ensure consistent state
+            update_udp_state()
 
     def get_params(self):
         result = {}
@@ -558,6 +647,10 @@ class MainWindow(QMainWindow):
         # Managers
         self.workflow_manager = WorkflowManager()
         self.engine = Engine()
+        
+        # Element Managers
+        self.global_element_manager = ElementManager("elements.json")
+        self.private_element_manager = ElementManager(None) # Init with no file until workflow loaded
 
         # Scheduler
         self.scheduler = QtScheduler()
@@ -753,11 +846,29 @@ class MainWindow(QMainWindow):
             return n in ("For循环", "Foreach循环", "While循环")
         def add_vars_from_item(it, into):
             d = it.data(0, Qt.UserRole) or {}
+            tname = d.get("tool_name")
             p = d.get("params", {}) or {}
             for k, v in p.items():
-                if isinstance(v, str) and (k.endswith("output_variable") or k.endswith("_variable") or k in ("output_variable","driver_variable","item_variable","list_variable")):
-                    into.add(v)
-        vars_set = set()
+                if isinstance(v, str) and v and (k.endswith("output_variable") or k.endswith("_variable") or k in ("output_variable","driver_variable","item_variable","list_variable")):
+                    # Determine type
+                    v_type = "一般变量"
+                    if k == "output_variable":
+                        if tname == "Open Browser": v_type = "网页对象"
+                        elif tname == "Open Excel": v_type = "Excel对象"
+                    elif k == "driver_variable":
+                         # If it's a usage, we can't be sure if it's defined as such, but we can hint it
+                         # But better to leave it as is if already defined. 
+                         # If not defined, assume it's a web object because it's used as one.
+                         if v not in into: v_type = "网页对象"
+                         else: continue # Already defined
+                    
+                    if v not in into:
+                        into[v] = v_type
+                    elif into[v] == "一般变量" and v_type != "一般变量":
+                        # Upgrade type if we found a better definition
+                        into[v] = v_type
+
+        vars_map = {}
         root = self.workflow_tree.invisibleRootItem()
         stop_after_subtree = [False]
         target_item = None
@@ -801,22 +912,23 @@ class MainWindow(QMainWindow):
                 if mode == 'add' and it is target_item:
                     if indicator == QAbstractItemView.AboveItem:
                         return True
-                    add_vars_from_item(it, vars_set)
+                    add_vars_from_item(it, vars_map)
                     for j in range(it.childCount()):
                         sub = it.child(j)
                         if not is_end_marker(sub):
-                            add_vars_from_item(sub, vars_set)
+                            add_vars_from_item(sub, vars_map)
                             if traverse(sub):
                                 return True
                     return True
-                add_vars_from_item(it, vars_set)
+                add_vars_from_item(it, vars_map)
                 if traverse(it):
                     return True
             return False
         traverse(root)
         if within_loop_children():
-            vars_set.add("loop_index")
-        return sorted(vars_set)
+            vars_map["loop_index"] = "循环变量"
+            vars_map["item"] = "循环项"
+        return vars_map
 
     def create_toolbar_btn(self, text, color):
         btn = QPushButton(text)
@@ -967,6 +1079,20 @@ class MainWindow(QMainWindow):
                 return
                 
             if self.workflow_manager.save_workflow(name, group, workflow_data):
+                # Update private element manager path to match new save location
+                new_elements_path = os.path.join("workflows", group, f"{name}.elements.json")
+                # If we were working with a temporary or different path, we should probably save current data to new path
+                # But ElementManager.set_file_path(path) just switches. 
+                # We should explicitly save current cache to the new path.
+                
+                # Check if we need to migrate data? 
+                # If self.private_element_manager already has data (from editing session), 
+                # we want to save it to the new file.
+                current_data = self.private_element_manager._read_all()
+                self.private_element_manager.set_file_path(new_elements_path, load_now=False)
+                if current_data:
+                    self.private_element_manager._write_all(current_data)
+                
                 QMessageBox.information(self, "成功", f"流程 {name} 保存成功！")
                 self.refresh_saved_workflows_list()
             else:
@@ -1006,6 +1132,11 @@ class MainWindow(QMainWindow):
         workflow_data = self.workflow_manager.load_workflow(name, group)
         if workflow_data:
             self.create_undo_snapshot()
+            
+            # Setup private element manager
+            elements_path = os.path.join("workflows", group, f"{name}.elements.json")
+            self.private_element_manager.set_file_path(elements_path)
+            
             self.workflow_tree.clear()
             self.load_workflow_to_tree(workflow_data)
             self.status_label.setText(f"已加载流程: {group}/{name}")
@@ -1164,11 +1295,24 @@ class MainWindow(QMainWindow):
         params = existing_params or {}
         
         if schema and existing_params is None:
-            dlg = ParameterDialog(tool_name, schema, parent=self, scope_anchor=('add', target_item, indicator))
+            # Inject element managers into dialog context via parent
+            # We can attach them to MainWindow instance since ParameterDialog uses self.parent()
+            # But ParameterDialog.parent() is self (MainWindow).
+            # So we can just access self.private_element_manager in ParameterDialog if we pass it explicitly or make it accessible.
+            # ParameterDialog is in this file, so we can modify its constructor to accept managers?
+            # Or better, WidgetFactory needs them. 
+            
+            # Let's pass extra_context to ParameterDialog
+            extra_context = {
+                "element_manager_private": self.private_element_manager,
+                "element_manager_global": self.global_element_manager
+            }
+            
+            dlg = ParameterDialog(tool_name, schema, parent=self, scope_anchor=('add', target_item, indicator), extra_context=extra_context)
             if dlg.exec():
                 params = dlg.get_params()
             else:
-                return 
+                return  
 
         # Handle EndMarker target adjustment
         if target_item:
@@ -1314,7 +1458,11 @@ class MainWindow(QMainWindow):
         schema = tool_cls().get_param_schema()
         
         if schema:
-            dlg = ParameterDialog(tool_name, schema, current_params=params, parent=self, scope_anchor=('edit', item))
+            extra_context = {
+                "element_manager_private": self.private_element_manager,
+                "element_manager_global": self.global_element_manager
+            }
+            dlg = ParameterDialog(tool_name, schema, current_params=params, parent=self, scope_anchor=('edit', item), extra_context=extra_context)
             if dlg.exec():
                 new_params = dlg.get_params()
                 data["params"] = new_params
@@ -1483,6 +1631,11 @@ class MainWindow(QMainWindow):
     def _run_thread(self, workflow_data):
         try:
             self.engine.load_workflow(workflow_data, ENGINE_REGISTRY)
+            
+            # Inject element managers
+            self.engine.context["element_manager_private"] = self.private_element_manager
+            self.engine.context["element_manager_global"] = self.global_element_manager
+            
             self.engine.run()
             # UI updates must be done via signals or slots, but status_label setText is not thread safe?
             # Actually PySide6 signals are thread safe.
