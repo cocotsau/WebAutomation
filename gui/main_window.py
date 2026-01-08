@@ -1,4 +1,5 @@
 import sys
+import os
 import json
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -9,6 +10,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PySide6.QtCore import Qt, QTimer
 from apscheduler.schedulers.qt import QtScheduler
 from apscheduler.triggers.cron import CronTrigger
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from core.engine import Engine
 from core.workflow_manager import WorkflowManager
@@ -49,9 +52,9 @@ TOOL_CATEGORIES = {
         "关闭 Excel": CloseExcelAction
     },
     "逻辑控制": {
-        "次数循环": LoopAction,
-        "遍历循环": ForEachAction,
-        "条件循环": WhileAction
+        "For循环": LoopAction,
+        "Foreach循环": ForEachAction,
+        "While循环": WhileAction
     },
     "数据与工具": {
         "等待并复制文件": WaitForFileAndCopyAction,
@@ -438,7 +441,7 @@ class MainWindow(QMainWindow):
             # For simplicity, we assume if it's in logic tools, it's a container
             parent_data = parent.data(0, Qt.UserRole)
             parent_name = parent_data.get("tool_name")
-            if parent_name in ["次数循环", "遍历循环", "条件循环"]:
+            if parent_name in ["For循环", "Foreach循环", "While循环"]:
                 parent.addChild(tree_item)
                 parent.setExpanded(True)
             else:
