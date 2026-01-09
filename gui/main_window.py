@@ -4,11 +4,11 @@ import json
 import logging
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QListWidget, QTreeWidget, QTreeWidgetItem, 
+                               QHBoxLayout, QListWidget, QTreeWidget, QTreeWidgetItem, QListWidgetItem,
                                QPushButton, QLabel, QMessageBox, QInputDialog, 
                                QMenu, QDialog, QFormLayout, QLineEdit, QComboBox, 
                                QCheckBox, QAbstractItemView, QTabWidget, QStyledItemDelegate, QStyle, QStyleOptionViewItem,
-                               QSplitter, QTextEdit, QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QScrollArea)
+                               QSplitter, QTextEdit, QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QScrollArea, QGridLayout)
 from PySide6.QtCore import Qt, QTimer, Signal, QSize, QRect, Slot, QObject, QMetaObject, Q_ARG, QEvent, QMimeData, QPoint
 from PySide6.QtGui import QPainter, QColor, QFont, QPen, QBrush, QIcon, QAction, QCursor, QDrag, QPixmap
 from apscheduler.schedulers.qt import QtScheduler
@@ -518,6 +518,21 @@ class WorkflowTreeWidget(QTreeWidget):
             self.tool_dropped.emit(tool_name, target, indicator_int)
             event.acceptProposedAction()
 
+def get_relative_time(dt):
+    now = datetime.now()
+    diff = now - dt
+    if diff.days > 365:
+        return f"{diff.days // 365}年前"
+    if diff.days > 30:
+        return f"{diff.days // 30}个月前"
+    if diff.days > 0:
+        return f"{diff.days}天前"
+    if diff.seconds > 3600:
+        return f"{diff.seconds // 3600}小时前"
+    if diff.seconds > 60:
+        return f"{diff.seconds // 60}分钟前"
+    return "刚刚"
+
 class StepItemDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -585,13 +600,13 @@ class StepItemDelegate(QStyledItemDelegate):
         painter.setPen(Qt.white)
         font = painter.font()
         font.setBold(True)
-        font.setPointSize(12)
+        font.setPointSize(10)
         painter.setFont(font)
         painter.drawText(icon_rect, Qt.AlignCenter, tool_name[0] if tool_name else "?")
         
         # Title
         title_rect = QRect(icon_rect.right() + 12, content_rect.top() + 4, content_rect.width() - 50, 20)
-        font.setPointSize(10)
+        font.setPointSize(9)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(QColor("#303133"))
@@ -607,7 +622,7 @@ class StepItemDelegate(QStyledItemDelegate):
         
         subtitle_rect = QRect(icon_rect.right() + 12, title_rect.bottom() + 4, content_rect.width() - 50, 16)
         font.setBold(False)
-        font.setPointSize(9)
+        font.setPointSize(8)
         painter.setFont(font)
         painter.setPen(QColor("#909399"))
         
@@ -630,10 +645,13 @@ class LogSignalHandler(QObject, logging.Handler):
         self.new_record.emit(time_str, record.levelname, msg)
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, manager_ref=None, initial_geometry=None):
         super().__init__()
         self.setWindowTitle("ViewAuto - 智能自动化流程编排")
-        self.resize(1400, 900)
+        if initial_geometry:
+            self.setGeometry(initial_geometry)
+        else:
+            self.resize(1200, 800)
         self.setStyleSheet("""
             QMainWindow { background-color: #F2F6FC; }
             QSplitter::handle { background-color: #DCDFE6; width: 1px; }
@@ -669,6 +687,7 @@ class MainWindow(QMainWindow):
 
         # --- Left Panel: Toolbox ---
         self.left_panel = QWidget()
+        self.left_panel.setFixedWidth(200)
         self.left_panel.setStyleSheet("background-color: white;")
         left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -711,8 +730,8 @@ class MainWindow(QMainWindow):
         toolbox_layout.addWidget(self.toolbox_tree)
         self.left_tabs.addTab(toolbox_widget, "组件库")
         
-        # Saved Workflows Tab
-        self.init_saved_workflows_tab()
+        # Manager reference for back navigation
+        self.manager_ref = manager_ref
         
         left_layout.addWidget(self.left_tabs)
         main_splitter.addWidget(self.left_panel)
@@ -735,14 +754,24 @@ class MainWindow(QMainWindow):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(10, 5, 10, 5)
         
+        # Back button
+        self.btn_back = self.create_toolbar_btn("返回", "#909399")
+        self.btn_back.clicked.connect(self.handle_back_to_manager)
+        
         self.btn_save = self.create_toolbar_btn("保存", "#67C23A")
         self.btn_save.clicked.connect(self.save_workflow_dialog)
         
         self.btn_run = self.create_toolbar_btn("运行", "#409EFF")
-        self.btn_run.clicked.connect(self.run_workflow)
+        self.btn_run.clicked.connect(lambda: self.run_workflow())
 
         self.btn_schedule = self.create_toolbar_btn("定时 (9:00)", "#E6A23C")
-        self.btn_schedule.clicked.connect(self.toggle_schedule)
+        try:
+            if hasattr(self, "toggle_schedule"):
+                self.btn_schedule.clicked.connect(self.toggle_schedule)
+            else:
+                self.btn_schedule.setEnabled(False)
+        except Exception:
+            self.btn_schedule.setEnabled(False)
         
         self.btn_clear = self.create_toolbar_btn("清空", "#F56C6C")
         self.btn_clear.clicked.connect(self.confirm_clear_workflow)
@@ -751,6 +780,7 @@ class MainWindow(QMainWindow):
         self.btn_undo.setEnabled(False)
         self.btn_undo.clicked.connect(self.perform_undo)
         
+        toolbar_layout.addWidget(self.btn_back)
         toolbar_layout.addWidget(self.btn_save)
         toolbar_layout.addWidget(self.btn_run)
         toolbar_layout.addWidget(self.btn_schedule)
@@ -765,14 +795,26 @@ class MainWindow(QMainWindow):
         self.workflow_tree.setHeaderLabel("流程步骤")
         self.workflow_tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.workflow_tree.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.workflow_tree.customContextMenuRequested.connect(self.show_context_menu)
+        try:
+            if hasattr(self, "show_context_menu"):
+                self.workflow_tree.customContextMenuRequested.connect(self.show_context_menu)
+            else:
+                # Fallback: disable context menu if handler missing
+                self.workflow_tree.setContextMenuPolicy(Qt.NoContextMenu)
+        except Exception:
+            self.workflow_tree.setContextMenuPolicy(Qt.NoContextMenu)
         self.workflow_tree.tool_dropped.connect(self.handle_tool_drop)
         self.workflow_tree.internal_move.connect(self.handle_internal_move)
         self.workflow_tree.setItemDelegate(StepItemDelegate(self.workflow_tree))
         self.workflow_tree.setUniformRowHeights(False)
         self.workflow_tree.setStyleSheet("QTreeWidget { border: none; }")
-        self.workflow_tree.itemCollapsed.connect(self.handle_item_collapsed)
-        self.workflow_tree.itemExpanded.connect(self.handle_item_expanded)
+        try:
+            if hasattr(self, "handle_item_collapsed"):
+                self.workflow_tree.itemCollapsed.connect(self.handle_item_collapsed)
+            if hasattr(self, "handle_item_expanded"):
+                self.workflow_tree.itemExpanded.connect(self.handle_item_expanded)
+        except Exception:
+            pass
         self.workflow_tree.itemDoubleClicked.connect(self.edit_step_on_double_click)
         
         workflow_layout.addWidget(self.workflow_tree)
@@ -955,6 +997,8 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str, str)
     def add_log_record(self, time_str, level, msg):
+        if not hasattr(self, "log_table"):
+            return
         row = self.log_table.rowCount()
         self.log_table.insertRow(row)
         
@@ -1044,6 +1088,24 @@ class MainWindow(QMainWindow):
         if not workflow_data:
             QMessageBox.warning(self, "警告", "无法保存空流程！")
             return
+        
+        # If current workflow has identity, save directly (update)
+        current_name = getattr(self, "current_workflow_name", None)
+        current_group = getattr(self, "current_workflow_group", None)
+        if current_name and current_group:
+            if self.workflow_manager.save_workflow(current_name, current_group, workflow_data):
+                # Ensure private element manager path aligns and persist any existing cache
+                new_elements_path = os.path.join("workflows", current_group, f"{current_name}.elements.json")
+                current_data = self.private_element_manager._read_all()
+                self.private_element_manager.set_file_path(new_elements_path, load_now=False)
+                if current_data:
+                    self.private_element_manager._write_all(current_data)
+                QMessageBox.information(self, "成功", f"流程 {current_group}/{current_name} 已更新保存。")
+                self.refresh_saved_workflows_list()
+                return
+            else:
+                QMessageBox.critical(self, "错误", "保存失败，请检查名称是否合法。")
+                return
 
         dlg = QDialog(self)
         dlg.setWindowTitle("保存流程")
@@ -1095,6 +1157,9 @@ class MainWindow(QMainWindow):
                 
                 QMessageBox.information(self, "成功", f"流程 {name} 保存成功！")
                 self.refresh_saved_workflows_list()
+                # Set current workflow identity for subsequent quick saves
+                self.current_workflow_name = name
+                self.current_workflow_group = group
             else:
                 QMessageBox.critical(self, "错误", "保存失败，请检查名称是否合法。")
 
@@ -1140,12 +1205,29 @@ class MainWindow(QMainWindow):
             self.workflow_tree.clear()
             self.load_workflow_to_tree(workflow_data)
             self.status_label.setText(f"已加载流程: {group}/{name}")
+            self.current_workflow_name = name
+            self.current_workflow_group = group
+            # After loading a workflow in editor, show back button if manager exists
+            self.btn_back.setVisible(bool(self.manager_ref))
+    
+    def handle_back_to_manager(self):
+        if self.manager_ref:
+            try:
+                rect = self.geometry()
+                self.manager_ref.setGeometry(rect)
+                self.manager_ref.show()
+                if hasattr(self.manager_ref, "refresh"):
+                    self.manager_ref.refresh()
+            except Exception:
+                pass
+        self.close()
 
     def add_tool_to_workflow(self, item, column):
         data = item.data(0, Qt.UserRole)
         if data == "tool":
             tool_name = item.text(0)
             self.add_step(tool_name)
+
     def handle_toolbox_item_clicked(self, item, column):
         data = item.data(0, Qt.UserRole)
         if data == "tool":
@@ -1153,7 +1235,6 @@ class MainWindow(QMainWindow):
         item.setExpanded(not item.isExpanded())
 
     def handle_tool_drop(self, tool_name, target_item, indicator):
-        # Normalize indicator to enum
         try:
             if isinstance(indicator, int):
                 indicator = QAbstractItemView.DropIndicatorPosition(indicator)
@@ -1165,53 +1246,41 @@ class MainWindow(QMainWindow):
             self.add_step(tool_name, target_item, indicator)
 
     def handle_internal_move(self, item, target_item, indicator):
-        # Normalize indicator to enum
         try:
             if isinstance(indicator, int):
                 indicator = QAbstractItemView.DropIndicatorPosition(indicator)
         except Exception:
             pass
 
-        # 1. EndMarker Logic (Target Adjustment)
         if target_item:
             data = target_item.data(0, Qt.UserRole)
             if data and data.get("tool_name") == "EndMarker":
                 if indicator == QAbstractItemView.BelowItem:
-                    # Drop below EndMarker -> Insert after the block
                     pass
                 else:
-                    # Drop on or above EndMarker -> Insert inside loop (Append to logic tool children)
                     parent = target_item.parent()
                     index = parent.indexOfChild(target_item) if parent else self.workflow_tree.indexOfTopLevelItem(target_item)
-                    
-                    # Find previous sibling (The Logic Tool)
                     logic_tool = None
                     if index > 0:
                         if parent:
                             logic_tool = parent.child(index - 1)
                         else:
                             logic_tool = self.workflow_tree.topLevelItem(index - 1)
-                    
                     if logic_tool:
                         target_item = logic_tool
-                        indicator = QAbstractItemView.OnItem # Append to children
+                        indicator = QAbstractItemView.OnItem
 
-        # NEW: Treat OnItem drops on non-container tools as Insert Below
         if target_item and indicator == QAbstractItemView.OnItem:
             t_data = target_item.data(0, Qt.UserRole)
             t_name = t_data.get("tool_name") if t_data else None
             if t_name and t_name not in LOGIC_TOOLS:
                 indicator = QAbstractItemView.BelowItem
 
-        # 2. Check if moving item is Logic Tool with EndMarker
         end_marker_to_move = None
         item_data = item.data(0, Qt.UserRole)
         if item_data and item_data.get("tool_name") in LOGIC_TOOLS:
-            # Find its sibling EndMarker
             parent = item.parent()
             index = parent.indexOfChild(item) if parent else self.workflow_tree.indexOfTopLevelItem(item)
-            
-            # Check next sibling
             next_sibling = None
             if parent:
                 if index + 1 < parent.childCount():
@@ -1219,14 +1288,11 @@ class MainWindow(QMainWindow):
             else:
                 if index + 1 < self.workflow_tree.topLevelItemCount():
                     next_sibling = self.workflow_tree.topLevelItem(index + 1)
-            
             if next_sibling:
                 ns_data = next_sibling.data(0, Qt.UserRole)
                 if ns_data and ns_data.get("tool_name") == "EndMarker":
                     end_marker_to_move = next_sibling
 
-        # 3. Perform Move
-        # Remove item from current parent
         current_parent = item.parent()
         if current_parent:
             current_parent.removeChild(item)
@@ -1239,17 +1305,14 @@ class MainWindow(QMainWindow):
                 em_index = self.workflow_tree.indexOfTopLevelItem(end_marker_to_move)
                 if em_index != -1:
                     self.workflow_tree.takeTopLevelItem(em_index)
-            
-        # Add to new location
+
         if target_item:
             parent = target_item.parent()
             if indicator == QAbstractItemView.OnItem:
-                # Append as child
                 target_item.addChild(item)
                 target_item.setExpanded(True)
                 if end_marker_to_move:
                     target_item.addChild(end_marker_to_move)
-                    
             elif indicator == QAbstractItemView.AboveItem:
                 if parent:
                     index = parent.indexOfChild(target_item)
@@ -1276,82 +1339,55 @@ class MainWindow(QMainWindow):
             self.workflow_tree.addTopLevelItem(item)
             if end_marker_to_move:
                 self.workflow_tree.addTopLevelItem(end_marker_to_move)
-            
         self.create_undo_snapshot()
-
     def add_step(self, tool_name, target_item=None, indicator=None, existing_params=None):
         tool_cls = ENGINE_REGISTRY.get(tool_name)
         if not tool_cls:
             return
-            
-        # Normalize indicator to enum for reliable comparisons
         try:
             if isinstance(indicator, int):
                 indicator = QAbstractItemView.DropIndicatorPosition(indicator)
         except Exception:
             pass
-        
         schema = tool_cls().get_param_schema()
         params = existing_params or {}
-        
         if schema and existing_params is None:
-            # Inject element managers into dialog context via parent
-            # We can attach them to MainWindow instance since ParameterDialog uses self.parent()
-            # But ParameterDialog.parent() is self (MainWindow).
-            # So we can just access self.private_element_manager in ParameterDialog if we pass it explicitly or make it accessible.
-            # ParameterDialog is in this file, so we can modify its constructor to accept managers?
-            # Or better, WidgetFactory needs them. 
-            
-            # Let's pass extra_context to ParameterDialog
             extra_context = {
                 "element_manager_private": self.private_element_manager,
                 "element_manager_global": self.global_element_manager
             }
-            
             dlg = ParameterDialog(tool_name, schema, parent=self, scope_anchor=('add', target_item, indicator), extra_context=extra_context)
             if dlg.exec():
                 params = dlg.get_params()
             else:
-                return  
-
-        # Handle EndMarker target adjustment
+                return
         if target_item:
             data = target_item.data(0, Qt.UserRole)
             if data and data.get("tool_name") == "EndMarker":
                 if indicator == QAbstractItemView.BelowItem:
-                    # Drop below EndMarker -> Insert after the block
                     pass
                 else:
-                    # Drop on or above EndMarker -> Insert inside loop (Append to logic tool children)
                     parent = target_item.parent()
                     index = parent.indexOfChild(target_item) if parent else self.workflow_tree.indexOfTopLevelItem(target_item)
-                    
-                    # Find previous sibling (The Logic Tool)
                     logic_tool = None
                     if index > 0:
                         if parent:
                             logic_tool = parent.child(index - 1)
                         else:
                             logic_tool = self.workflow_tree.topLevelItem(index - 1)
-                    
                     if logic_tool:
                         target_item = logic_tool
-                        indicator = QAbstractItemView.OnItem # Append to children
-
-        # NEW: Treat OnItem drops on non-container tools as Insert Below
+                        indicator = QAbstractItemView.OnItem
         if target_item and indicator == QAbstractItemView.OnItem:
             t_data = target_item.data(0, Qt.UserRole)
             t_name = t_data.get("tool_name") if t_data else None
             if t_name and t_name not in LOGIC_TOOLS:
                 indicator = QAbstractItemView.BelowItem
-
         item = QTreeWidgetItem([tool_name])
         item.setData(0, Qt.UserRole, {"tool_name": tool_name, "params": params})
-        
         if target_item:
             parent = target_item.parent()
             if indicator == QAbstractItemView.OnItem:
-                # Append as child
                 target_item.addChild(item)
                 target_item.setExpanded(True)
             elif indicator == QAbstractItemView.AboveItem:
@@ -1370,14 +1406,10 @@ class MainWindow(QMainWindow):
                     self.workflow_tree.insertTopLevelItem(index + 1, item)
         else:
             self.workflow_tree.addTopLevelItem(item)
-
-        # Add EndMarker if logic tool
         if tool_name in LOGIC_TOOLS:
             end_item = QTreeWidgetItem([f"结束 {tool_name}"])
             end_item.setData(0, Qt.UserRole, {"tool_name": "EndMarker", "params": {}})
-            end_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable) # Disable drag
-            
-            # Insert EndMarker as Sibling (After item)
+            end_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             parent = item.parent()
             if parent:
                 index = parent.indexOfChild(item)
@@ -1385,35 +1417,27 @@ class MainWindow(QMainWindow):
             else:
                 index = self.workflow_tree.indexOfTopLevelItem(item)
                 self.workflow_tree.insertTopLevelItem(index + 1, end_item)
-            
             item.setExpanded(True)
-        
-        # Snapshot for undo
         self.create_undo_snapshot()
 
     def show_context_menu(self, pos):
         item = self.workflow_tree.itemAt(pos)
         if not item:
             return
-            
         data = item.data(0, Qt.UserRole)
         if data and data.get("tool_name") == "EndMarker":
             return
-
         menu = QMenu(self)
         edit_action = menu.addAction("编辑参数")
         delete_action = menu.addAction("删除步骤")
         disabled = (data or {}).get("disabled", False)
         toggle_disable_action = menu.addAction("启用步骤" if disabled else "禁用步骤")
-        
         action = menu.exec(self.workflow_tree.mapToGlobal(pos))
-        
         if action == edit_action:
             self.edit_step(item)
         elif action == delete_action:
             self.create_undo_snapshot()
             parent = item.parent()
-            # If deleting a logic tool, also remove its sibling EndMarker
             data = item.data(0, Qt.UserRole) or {}
             name = data.get("tool_name")
             if parent:
@@ -1428,12 +1452,10 @@ class MainWindow(QMainWindow):
             else:
                 if name in LOGIC_TOOLS:
                     idx = self.workflow_tree.indexOfTopLevelItem(item)
-                    # Check next top-level for EndMarker
                     if idx + 1 < self.workflow_tree.topLevelItemCount():
                         sib = self.workflow_tree.topLevelItem(idx + 1)
                         sdata = sib.data(0, Qt.UserRole) or {}
                         if sdata.get("tool_name") == "EndMarker":
-                            # Remove EndMarker first to avoid index shift
                             em_idx = self.workflow_tree.indexOfTopLevelItem(sib)
                             if em_idx != -1:
                                 self.workflow_tree.takeTopLevelItem(em_idx)
@@ -1442,21 +1464,17 @@ class MainWindow(QMainWindow):
                     self.workflow_tree.takeTopLevelItem(idx)
         elif action == toggle_disable_action:
             self.create_undo_snapshot()
-            # Toggle disabled flag
             d = item.data(0, Qt.UserRole) or {}
             d["disabled"] = not d.get("disabled", False)
             item.setData(0, Qt.UserRole, d)
-            # Refresh view
             self.workflow_tree.viewport().update()
 
     def edit_step(self, item):
         data = item.data(0, Qt.UserRole)
         tool_name = data["tool_name"]
         params = data["params"]
-        
         tool_cls = ENGINE_REGISTRY.get(tool_name)
         schema = tool_cls().get_param_schema()
-        
         if schema:
             extra_context = {
                 "element_manager_private": self.private_element_manager,
@@ -1482,7 +1500,6 @@ class MainWindow(QMainWindow):
         if not name or name not in LOGIC_TOOLS:
             return
         parent = item.parent()
-        # Find sibling EndMarker and hide it
         if parent:
             idx = parent.indexOfChild(item)
             if idx + 1 < parent.childCount():
@@ -1504,7 +1521,6 @@ class MainWindow(QMainWindow):
         if not name or name not in LOGIC_TOOLS:
             return
         parent = item.parent()
-        # Find sibling EndMarker and show it
         if parent:
             idx = parent.indexOfChild(item)
             if idx + 1 < parent.childCount():
@@ -1519,7 +1535,6 @@ class MainWindow(QMainWindow):
                 sdata = sib.data(0, Qt.UserRole) or {}
                 if sdata.get("tool_name") == "EndMarker":
                     sib.setHidden(False)
-
     def get_workflow_data(self):
         return self.get_items_data(self.workflow_tree.invisibleRootItem())
 
@@ -1659,8 +1674,354 @@ class MainWindow(QMainWindow):
         QMetaObject.invokeMethod(self.btn_save, "setEnabled", Qt.QueuedConnection, Q_ARG(bool, True))
         QMetaObject.invokeMethod(self.status_label, "setText", Qt.QueuedConnection, Q_ARG(str, "运行结束"))
 
+
+
+class WorkflowTable(QTableWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMouseTracking(True)
+        self.hover_row = -1
+
+    def leaveEvent(self, event):
+        self.hover_row = -1
+        self.viewport().update()
+        super().leaveEvent(event)
+
+    def mouseMoveEvent(self, event):
+        item = self.itemAt(event.pos())
+        old_hover = self.hover_row
+        if item:
+            self.hover_row = item.row()
+        else:
+            self.hover_row = -1
+        
+        if self.hover_row != old_hover:
+            self.viewport().update()
+        super().mouseMoveEvent(event)
+
+class WorkflowItemDelegate(QStyledItemDelegate):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.row_height = 68
+        # Colors from the screenshot
+        self.icon_colors = ["#409EFF", "#36C1F0", "#67C23A", "#2F9E44"]
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), self.row_height)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        
+        # Background
+        bg_rect = option.rect
+        is_selected = option.state & QStyle.State_Selected
+        is_hovered = False
+        
+        if hasattr(self.parent(), "hover_row"):
+            if self.parent().hover_row == index.row():
+                is_hovered = True
+        
+        if is_selected:
+            painter.fillRect(bg_rect, QColor("#F0F7FF"))
+        elif is_hovered:
+            painter.fillRect(bg_rect, QColor("#F5F7FA"))
+        else:
+            painter.fillRect(bg_rect, QColor("#FFFFFF"))
+
+        # Get Data
+        text = str(index.data(Qt.DisplayRole) or "")
+        
+        if index.column() == 0:
+            # Application Name Column
+            icon_size = 32
+            margin_left = 20
+            
+            # 1. Draw Icon
+            icon_rect = QRect(bg_rect.left() + margin_left, 
+                              bg_rect.top() + (bg_rect.height() - icon_size) // 2, 
+                              icon_size, icon_size)
+            
+            # Color based on row
+            colors = ["#409EFF", "#36C1F0", "#67C23A", "#F56C6C"]
+            color = QColor(colors[index.row() % len(colors)])
+            
+            painter.setBrush(color)
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(icon_rect, 4, 4)
+            
+            if text:
+                painter.setPen(Qt.white)
+                font = painter.font()
+                font.setBold(True)
+                font.setPointSize(12)
+                painter.setFont(font)
+                painter.drawText(icon_rect, Qt.AlignCenter, text[0].upper())
+            
+            # 2. Draw Text
+            text_rect = QRect(icon_rect.right() + 15, bg_rect.top(), 
+                              bg_rect.width() - icon_rect.right() - 25, bg_rect.height())
+            painter.setPen(QColor("#303133"))
+            font = painter.font()
+            font.setBold(False)
+            font.setPointSize(10)
+            painter.setFont(font)
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+            
+        elif index.column() == 1:
+            # Time Column
+            painter.setPen(QColor("#909399"))
+            font = painter.font()
+            font.setPointSize(9)
+            painter.setFont(font)
+            # Indent from right
+            text_rect = bg_rect.adjusted(0, 0, -20, 0)
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignRight, text)
+            
+        elif index.column() == 2:
+            # Status Column
+            painter.setPen(QColor("#909399"))
+            font = painter.font()
+            font.setPointSize(9)
+            painter.setFont(font)
+            text_rect = bg_rect.adjusted(10, 0, -10, 0)
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+
+        # Bottom Border
+        painter.setPen(QColor("#EBEEF5"))
+        painter.drawLine(bg_rect.bottomLeft(), bg_rect.bottomRight())
+        
+        painter.restore()
+
+class FlowManagerWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ViewAuto - 流程管理")
+        self.resize(1200, 800)
+        self.workflow_manager = WorkflowManager()
+        
+        # Central Widget
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Sidebar
+        sidebar = QFrame()
+        sidebar.setFixedWidth(200)
+        sidebar.setStyleSheet("background-color: #F5F7FA; border-right: 1px solid #E4E7ED;")
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(15, 20, 15, 20)
+        sidebar_layout.setSpacing(15)
+        
+        # Create Button
+        btn_new = QPushButton("+ 新建")
+        btn_new.setFixedHeight(36)
+        btn_new.setCursor(Qt.PointingHandCursor)
+        btn_new.setStyleSheet("""
+            QPushButton {
+                background-color: #F56C6C; 
+                color: white; 
+                border-radius: 18px; 
+                font-size: 13px; 
+                font-weight: bold;
+                outline: none;
+            }
+            QPushButton:hover { background-color: #F78989; }
+        """)
+        btn_new.clicked.connect(self.create_new)
+        sidebar_layout.addWidget(btn_new)
+        
+        # Nav Menu
+        self.nav_list = QListWidget()
+        self.nav_list.setFrameShape(QFrame.NoFrame)
+        self.nav_list.setStyleSheet("""
+            QListWidget { background-color: transparent; border: none; outline: none; }
+            QListWidget::item { height: 40px; border-radius: 4px; color: #606266; padding-left: 10px; }
+            QListWidget::item:hover { background-color: #E6E8EB; }
+            QListWidget::item:selected { background-color: #ECF5FF; color: #409EFF; }
+        """)
+        items = ["我的工作流"]
+        for i, label in enumerate(items):
+            item = QListWidgetItem(label)
+            self.nav_list.addItem(item)
+        self.nav_list.setCurrentRow(0)
+        sidebar_layout.addWidget(self.nav_list)
+        sidebar_layout.addStretch()
+        
+        main_layout.addWidget(sidebar)
+        
+        # Content Area
+        content = QFrame()
+        content.setStyleSheet("background-color: #FFFFFF;")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(30, 30, 30, 30)
+        
+        # Header
+        header_layout = QHBoxLayout()
+        title = QLabel("我的工作流")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #303133;")
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+        
+        # Refresh & Search
+        btn_refresh = QPushButton("刷新")
+        btn_refresh.setCursor(Qt.PointingHandCursor)
+        btn_refresh.setStyleSheet("border: none; color: #409EFF;")
+        btn_refresh.clicked.connect(self.refresh)
+        header_layout.addWidget(btn_refresh)
+        
+        content_layout.addLayout(header_layout)
+        
+        # Workflow List (Table)
+        self.wf_table = WorkflowTable()
+        self.wf_table.setColumnCount(3)
+        self.wf_table.setHorizontalHeaderLabels(["应用名称", "更新时间", "状态"])
+        
+        # Table Header Styling
+        header = self.wf_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        
+        self.wf_table.verticalHeader().setVisible(False)
+        self.wf_table.verticalHeader().setDefaultSectionSize(68) # Force row height
+        self.wf_table.setShowGrid(False)
+        self.wf_table.setFrameShape(QFrame.NoFrame)
+        self.wf_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.wf_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.wf_table.setSortingEnabled(True)
+        self.wf_table.horizontalHeader().setSortIndicator(1, Qt.DescendingOrder)
+        
+        # Apply Delegate BEFORE refresh
+        self.wf_table.setItemDelegate(WorkflowItemDelegate(self.wf_table))
+        
+        self.wf_table.setStyleSheet("""
+            QTableWidget { 
+                border: none; 
+                background-color: white; 
+                selection-background-color: #F0F7FF; 
+                selection-color: #303133;
+                outline: none;
+            }
+            QTableWidget::item { 
+                border: none; 
+                padding: 0px;
+            }
+            QHeaderView::section { 
+                background-color: white; 
+                border: none; 
+                border-bottom: 1px solid #EBEEF5; 
+                color: #909399; 
+                padding: 10px 20px; 
+                font-weight: normal; 
+            }
+        """)
+        self.wf_table.cellDoubleClicked.connect(self.on_table_double_click)
+        self.wf_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.wf_table.customContextMenuRequested.connect(self.show_context_menu)
+        
+        content_layout.addWidget(self.wf_table)
+        
+        main_layout.addWidget(content)
+        
+        self.refresh()
+
+    def refresh(self):
+        # Disable sorting during data update to prevent row mismatch
+        self.wf_table.setSortingEnabled(False)
+        self.wf_table.setRowCount(0)
+        
+        workflows = self.workflow_manager.list_workflows()
+        
+        row = 0
+        for group, names in workflows.items():
+            for name in names:
+                self.wf_table.insertRow(row)
+                
+                # Name Item
+                name_item = QTableWidgetItem(name)
+                name_item.setData(Qt.UserRole, {"name": name, "group": group})
+                self.wf_table.setItem(row, 0, name_item)
+                
+                # Time Item
+                time_str = "-"
+                try:
+                    path = os.path.join("workflows", group, f"{name}.json")
+                    if os.path.exists(path):
+                        mtime = os.path.getmtime(path)
+                        dt = datetime.fromtimestamp(mtime)
+                        time_str = get_relative_time(dt)
+                except:
+                    pass
+                time_item = QTableWidgetItem(time_str)
+                time_item.setForeground(QColor("#909399"))
+                self.wf_table.setItem(row, 1, time_item)
+                
+                # Status Item
+                status_item = QTableWidgetItem("编辑中")
+                status_item.setForeground(QColor("#909399"))
+                self.wf_table.setItem(row, 2, status_item)
+                
+                self.wf_table.setRowHeight(row, 68)
+                row += 1
+        
+        # Re-enable sorting and apply default sort
+        self.wf_table.setSortingEnabled(True)
+        self.wf_table.horizontalHeader().setSortIndicator(1, Qt.DescendingOrder)
+
+    def on_table_double_click(self, row, col):
+        item = self.wf_table.item(row, 0)
+        if item:
+            data = item.data(Qt.UserRole)
+            self.open_editor(data["name"], data["group"])
+
+    def open_editor(self, name, group):
+        rect = self.geometry()
+        editor = MainWindow(manager_ref=self, initial_geometry=rect)
+        editor.load_workflow(name, group)
+        editor.show()
+        self.hide()
+
+    def create_new(self):
+        rect = self.geometry()
+        editor = MainWindow(manager_ref=self, initial_geometry=rect)
+        editor.show()
+        self.hide()
+
+    def show_context_menu(self, pos):
+        item = self.wf_table.itemAt(pos)
+        if not item:
+            return
+        # Ensure we get the name item (col 0)
+        row = item.row()
+        name_item = self.wf_table.item(row, 0)
+        if not name_item:
+            return
+            
+        data = name_item.data(Qt.UserRole)
+        name = data["name"]
+        group = data["group"]
+        
+        menu = QMenu(self)
+        edit_action = menu.addAction("编辑")
+        delete_action = menu.addAction("删除")
+        
+        action = menu.exec(self.wf_table.mapToGlobal(pos))
+        
+        if action == edit_action:
+            self.open_editor(name, group)
+        elif action == delete_action:
+            res = QMessageBox.question(self, "确认删除", f"确定删除流程 {name}？", QMessageBox.Yes | QMessageBox.No)
+            if res == QMessageBox.Yes:
+                self.workflow_manager.delete_workflow(name, group)
+                self.refresh()
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    window = MainWindow()
+    window = FlowManagerWindow()
     window.show()
     sys.exit(app.exec())

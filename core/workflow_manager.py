@@ -67,6 +67,9 @@ class WorkflowManager:
         Delete a workflow file.
         """
         try:
+            if not isinstance(name, str) or not isinstance(group, str):
+                print("Error deleting workflow: name/group must be strings")
+                return False
             file_path = os.path.join(self.base_dir, group, f"{name}.json")
             if os.path.exists(file_path):
                 os.remove(file_path)

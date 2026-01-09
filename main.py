@@ -3,6 +3,9 @@ from tools.basic_tools import PrintLogAction, DelayAction, SetVariableAction, Fi
 from tools.excel_tools import OpenExcelAction, ReadExcelAction, GetExcelRowCountAction, WriteExcelAction, SaveExcelAction, CloseExcelAction
 from tools.logic_tools import WhileAction
 from tools.util_tools import ExtractContentAction
+import sys
+from PySide6.QtWidgets import QApplication
+from gui.main_window import FlowManagerWindow
 
 # Registry of available tools
 TOOL_REGISTRY = {
@@ -111,4 +114,10 @@ def main():
     engine.run()
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "cli":
+        main()
+    else:
+        app = QApplication(sys.argv)
+        win = FlowManagerWindow()
+        win.show()
+        sys.exit(app.exec())

@@ -251,7 +251,7 @@ class OpenBrowserAction(ActionBase):
             {"name": "browser_type", "type": "str", "label": "浏览器类型", "default": "chrome", "options": ["chrome", "browser360", "edge", "firefox"]},
             {"name": "output_variable", "type": "str", "label": "输出变量名", "default": "Web Page"},
             {"name": "url", "type": "str", "label": "初始URL", "default": "https://"},
-            {"name": "kill_process", "type": "bool", "label": "结束同类进程", "default": False, "advanced": True},
+            {"name": "kill_process", "type": "bool", "label": "结束同类进程", "default": False},
             {"name": "debug_port", "type": "int", "label": "调试端口", "default": default_port, "advanced": True, "enable_if": {"kill_process": True}},
             {"name": "incognito", "type": "bool", "label": "隐私模式", "default": False, "advanced": True},
             {"name": "headless", "type": "bool", "label": "无头模式", "default": False, "advanced": True},
