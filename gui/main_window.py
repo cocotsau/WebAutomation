@@ -24,8 +24,9 @@ from tools.web_tools import (OpenBrowserAction, CloseBrowserAction, ClickElement
                              InputTextAction, GoToUrlAction, GetElementInfoAction,
                              HoverElementAction, SwitchFrameAction, ScrollToElementAction, SwitchWindowAction,
                              DrawMousePathAction, HttpDownloadAction,
-                             SaveElementAction,
-                             WaitElementAction, WaitAllElementsAction)
+                             SaveElementAction, SetCheckboxAction,
+                             WaitElementAction, WaitAllElementsAction,
+                             GetFirstVisibleAction, FindChildAction, FindChildrenAction)
 from tools.logic_tools import (LoopAction, ForEachAction, WhileAction, 
                                IfAction, ElseIfAction, ElseAction, 
                                BreakAction, ContinueAction)
@@ -52,6 +53,7 @@ TOOL_CATEGORIES = {
         "点击元素": ClickElementAction,
         "输入文本": InputTextAction,
         "获取元素信息": GetElementInfoAction,
+        "设置复选框": SetCheckboxAction,
         "保存元素": SaveElementAction,
         "悬停在元素上方": HoverElementAction,
         "滚动到元素": ScrollToElementAction,
@@ -61,6 +63,9 @@ TOOL_CATEGORIES = {
         "HTTP 下载": HttpDownloadAction,
         "等待元素": WaitElementAction,
         "等待全部元素": WaitAllElementsAction,
+        "获取第一个可见元素": GetFirstVisibleAction,
+        "查找子元素": FindChildAction,
+        "查找所有子元素": FindChildrenAction,
         "关闭浏览器": CloseBrowserAction
     },
     "Excel 工具": {
@@ -90,10 +95,11 @@ TOOL_CATEGORIES = {
 }
 
 # Import extra tools dynamically if needed or ensure they are imported above
-from tools.basic_tools import CalculateAction, FileDialogAction, InputDialogAction
+from tools.basic_tools import CalculateAction, FileDialogAction, InputDialogAction, CommentAction
 TOOL_CATEGORIES["基础工具"]["计算表达式"] = CalculateAction
 TOOL_CATEGORIES["基础工具"]["文件选择"] = FileDialogAction
 TOOL_CATEGORIES["基础工具"]["输入对话框"] = InputDialogAction
+TOOL_CATEGORIES["基础工具"]["备注"] = CommentAction
 TOOL_CATEGORIES["数据与工具"]["提取内容"] = None # Will import below
 from tools.util_tools import ExtractContentAction
 TOOL_CATEGORIES["数据与工具"]["提取内容"] = ExtractContentAction
@@ -131,8 +137,9 @@ class ParameterDialog(QDialog):
                 return self.parent().gather_context_variables_scoped(self.scope_anchor)
             return {}
 
-        def open_var_picker(target_widget):
-            WidgetFactory.open_variable_picker(self, target_widget, get_context)
+        def open_var_picker(target_widget, field_schema=None):
+            expected_type = field_schema.get("variable_type") if field_schema else None
+            WidgetFactory.open_variable_picker(self, target_widget, get_context, expected_type)
 
         for field in schema:
             key = field['name']
@@ -141,7 +148,9 @@ class ParameterDialog(QDialog):
             val = self.params.get(key, default)
             target_layout = basic_layout if not field.get('advanced', False) else advanced_layout
             
-            inp = WidgetFactory.create_widget(field, val, self, get_context, tool_name)
+            # Create widget with a closure for the variable picker that knows the field
+            inp = WidgetFactory.create_widget(field, val, self, get_context, tool_name, 
+                                            variable_picker_callback=lambda w, f=field: open_var_picker(w, f))
             
             # Wrap with tools (browse, fx) if necessary
             # We assume WidgetFactory handles basic widget creation, 
@@ -153,7 +162,7 @@ class ParameterDialog(QDialog):
                 final_widget = WidgetFactory.wrap_with_tools(inp, field, self, open_var_picker, extra_context=self.extra_context)
             
             target_layout.addRow(label + ":", final_widget)
-            self.inputs[key] = (inp, field['type'])
+            self.inputs[key] = (inp, field['type'], final_widget)
             
             if 'enable_if' in field:
                 self.dependencies.append((key, field['enable_if']))
@@ -175,7 +184,7 @@ class ParameterDialog(QDialog):
         self.setup_special_handlers()
 
     def setup_dependencies(self):
-        for key, (inp, type_str) in self.inputs.items():
+        for key, (inp, type_str, container) in self.inputs.items():
             if isinstance(inp, QCheckBox):
                 inp.stateChanged.connect(self.check_dependencies)
             elif isinstance(inp, QComboBox):
@@ -189,18 +198,16 @@ class ParameterDialog(QDialog):
             if target_key not in self.inputs:
                 continue
             
-            target_widget, _ = self.inputs[target_key]
+            target_widget, _, container = self.inputs[target_key]
             # Since target_widget might be wrapped in a container (make_fx_row)
-            # we need to find the container if we want to hide the whole row?
-            # But here we just setEnabled on the widget itself.
-            # The label will remain enabled, which is standard behavior.
+            # we need to setEnabled on the container so tools are also disabled.
             
             enabled = True
             for src_key, required_val in conditions.items():
                 if src_key not in self.inputs:
                     continue
                 
-                src_widget, src_type = self.inputs[src_key]
+                src_widget, src_type, _ = self.inputs[src_key]
                 current_val = None
                 
                 if isinstance(src_widget, QCheckBox):
@@ -220,22 +227,26 @@ class ParameterDialog(QDialog):
                         except:
                             pass
                 
-                if current_val != required_val:
+                if isinstance(required_val, list):
+                    if current_val not in required_val:
+                        enabled = False
+                        break
+                elif current_val != required_val:
                     enabled = False
                     break
             
-            target_widget.setEnabled(enabled)
+            container.setEnabled(enabled)
 
     def setup_special_handlers(self):
         # Special logic for Open Browser: use_local_profile
         if "use_local_profile" in self.inputs and "user_data_dir" in self.inputs:
-            chk, _ = self.inputs["use_local_profile"]
-            udp_widget, _ = self.inputs["user_data_dir"]
+            chk, _, _ = self.inputs["use_local_profile"]
+            udp_widget, _, _ = self.inputs["user_data_dir"]
             
             # Find browser_type input if exists
             browser_type_widget = None
             if "browser_type" in self.inputs:
-                browser_type_widget, _ = self.inputs["browser_type"]
+                browser_type_widget, _, _ = self.inputs["browser_type"]
 
             def update_udp_state():
                 checked = chk.isChecked()
@@ -292,14 +303,71 @@ class ParameterDialog(QDialog):
             chk.stateChanged.connect(update_udp_state)
             if browser_type_widget and isinstance(browser_type_widget, QComboBox):
                 browser_type_widget.currentTextChanged.connect(update_udp_state)
-            
-            # Initial call if checked (it defaults to False, so this might not do much unless default is True)
-            # But we should call it to ensure consistent state
-            update_udp_state()
+        
+        if "value_type" in self.inputs and "value" in self.inputs:
+            vt_widget, _, _ = self.inputs["value_type"]
+            val_widget, _, container = self.inputs["value"]
+
+            def update_value_widget():
+                t = vt_widget.currentText() if isinstance(vt_widget, QComboBox) else ""
+                if isinstance(val_widget, QCheckBox):
+                    val_widget.setVisible(False)
+                if isinstance(val_widget, (QLineEdit, QTextEdit)):
+                    val_widget.setVisible(True)
+                if t == "bool":
+                    if not isinstance(val_widget, QCheckBox):
+                        cb = QCheckBox()
+                        current_text = ""
+                        if isinstance(val_widget, QLineEdit):
+                            current_text = val_widget.text()
+                        elif isinstance(val_widget, QTextEdit):
+                            current_text = val_widget.toPlainText()
+                        if str(current_text).strip().lower() in ("1", "true", "yes", "y", "on"):
+                            cb.setChecked(True)
+                        container.layout().replaceWidget(val_widget, cb)
+                        val_widget.hide()
+                        self.inputs["value"] = (cb, 'bool', container)
+                        nonlocal_val_widget = cb
+                        def _set_val_widget():
+                            nonlocal val_widget
+                            val_widget = nonlocal_val_widget
+                        _set_val_widget()
+                    val_widget.setVisible(True)
+                else:
+                    text_value = ""
+                    if isinstance(val_widget, QCheckBox):
+                        text_value = "true" if val_widget.isChecked() else "false"
+                    elif isinstance(val_widget, QLineEdit):
+                        text_value = val_widget.text()
+                    elif isinstance(val_widget, QTextEdit):
+                        text_value = val_widget.toPlainText()
+                    if t in ("list", "dict", "any"):
+                        if not isinstance(val_widget, QTextEdit):
+                            te = QTextEdit(text_value)
+                            te.setFixedHeight(60)
+                            container.layout().replaceWidget(val_widget, te)
+                            val_widget.hide()
+                            self.inputs["value"] = (te, 'text', container)
+                            val_widget = te
+                    else:
+                        if not isinstance(val_widget, QLineEdit):
+                            le = QLineEdit(text_value)
+                            container.layout().replaceWidget(val_widget, le)
+                            val_widget.hide()
+                            self.inputs["value"] = (le, 'str', container)
+                            val_widget = le
+
+            if isinstance(vt_widget, QComboBox):
+                vt_widget.currentTextChanged.connect(lambda _: update_value_widget())
+                update_value_widget()
 
     def get_params(self):
         result = {}
-        for key, (inp, type_str) in self.inputs.items():
+        for key, (inp, type_str, container) in self.inputs.items():
+            # Only save parameters that are currently enabled (respecting enable_if)
+            if not inp.isEnabled():
+                continue
+                
             if isinstance(inp, QComboBox):
                 result[key] = inp.currentText()
             elif type_str == 'bool':
@@ -470,6 +538,17 @@ class WorkflowTreeWidget(QTreeWidget):
 
         self.viewport().update()
 
+    def mouseDoubleClickEvent(self, event):
+        index = self.indexAt(event.pos())
+        if index.isValid():
+            indicator_width = 20
+            number_width = 40
+            boundary_x = 10 + indicator_width + number_width
+            if event.pos().x() < boundary_x:
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
+
     def paintEvent(self, event):
         super().paintEvent(event)
         
@@ -541,10 +620,20 @@ class StepItemDelegate(QStyledItemDelegate):
             "PrintLog": "#909399", "SetVariable": "#E6A23C",
             "OpenExcel": "#67C23A", "ReadExcel": "#67C23A", "WriteExcel": "#67C23A",
             "Loop": "#409EFF", "While": "#409EFF", "Default": "#409EFF",
-            "OpenBrowser": "#E6A23C", "ClickElement": "#E6A23C"
+            "OpenBrowser": "#E6A23C", "ClickElement": "#E6A23C",
+            "Comment": "#67C23A"
         }
 
     def sizeHint(self, option, index):
+        try:
+            tree = self.parent()
+            item = tree.itemFromIndex(index) if tree else None
+            data = item.data(0, Qt.UserRole) or {} if item else {}
+            tool_name = str(data.get("tool_name", index.data(Qt.DisplayRole) or ""))
+            if "备注" in tool_name:
+                return QSize(option.rect.width(), 40)
+        except Exception:
+            pass
         return QSize(option.rect.width(), self.row_height)
 
     def paint(self, painter, option, index):
@@ -554,41 +643,136 @@ class StepItemDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
         
-        # Indentation based on nesting depth
         depth = 0
-        idx = index
-        while idx.parent().isValid():
-            depth += 1
-            idx = idx.parent()
-        indent_offset = depth * 18
-
-        bg_rect = opt.rect
-        # Draw background
         tree = self.parent()
-        if option.state & QStyle.State_Selected:
-            painter.fillRect(bg_rect, QColor("#ECF5FF"))
-        elif (option.state & QStyle.State_MouseOver) and (not getattr(tree, "is_dragging", False)):
-            painter.fillRect(bg_rect, QColor("#F5F7FA"))
-        else:
-            painter.fillRect(bg_rect, QColor("#FFFFFF"))
-
-        content_rect = bg_rect.adjusted(10 + indent_offset, 4, -10, -4)
-        
-        # Data
+        item = tree.itemFromIndex(index)
+        root = tree.invisibleRootItem()
+        current = None
+        stack_depth = 0
+        for i in range(root.childCount()):
+            it = root.child(i)
+            data_iter = it.data(0, Qt.UserRole) or {}
+            name_iter = data_iter.get("tool_name")
+            if it is item:
+                current = it
+                depth = stack_depth
+                break
+            if name_iter in LOGIC_TOOLS:
+                stack_depth += 1
+            elif name_iter == "EndMarker":
+                if stack_depth > 0:
+                    stack_depth -= 1
+        indicator_width = 20  # 左侧折叠列点击区宽度
+        number_width = 40
+        separator_offset = 10 + indicator_width + number_width
+        bg_rect = opt.rect
         data = index.data(Qt.UserRole) or {}
         tool_name = str(data.get("tool_name", index.data(Qt.DisplayRole) or ""))
+        base_bg = QColor("#FFFFFF")
+        painter.fillRect(bg_rect, base_bg)
+        right_bg_rect = QRect(separator_offset, bg_rect.top(), max(0, bg_rect.right() - separator_offset), bg_rect.height())
+        if "备注" in tool_name:
+            painter.fillRect(right_bg_rect, QColor("#F0F9EB"))
+        else:
+            if option.state & QStyle.State_Selected:
+                painter.fillRect(right_bg_rect, QColor("#ECF5FF"))
+            elif (option.state & QStyle.State_MouseOver) and (not getattr(tree, "is_dragging", False)):
+                painter.fillRect(right_bg_rect, QColor("#F5F7FA"))
+
+        def compute_line_for(target):
+            counter = 0
+            line = None
+
+            def walk(parent):
+                nonlocal counter, line
+                for i in range(parent.childCount()):
+                    it = parent.child(i)
+                    counter += 1
+                    if it is target:
+                        line = counter
+                        return True
+                    if walk(it):
+                        return True
+                return False
+
+            walk(root)
+            return line
+
+        line_number = compute_line_for(item) if item is not None else None
+
+        if tool_name == "EndMarker" and depth > 0:
+            depth -= 1
+        indent_offset = depth * 18
+        content_rect = bg_rect.adjusted(separator_offset + 6 + indent_offset, 4, -10, -4)
         params = data.get("params", {})
         is_disabled = bool(data.get("disabled", False))
         if is_disabled:
             painter.setOpacity(0.45)
 
+        if line_number is not None:
+            number_rect = QRect(4, bg_rect.top(), number_width - 8, bg_rect.height())
+            painter.setPen(QColor("#606266"))
+            font = painter.font()
+            font.setPointSize(8)
+            painter.setFont(font)
+            painter.drawText(number_rect, Qt.AlignVCenter | Qt.AlignRight, str(line_number))
+
+        has_children = bool(item and item.childCount() > 0)
+        if has_children:
+            indicator_height = 14
+            inner_width = 16
+            indicator_rect = QRect(
+                4 + number_width + (indicator_width - inner_width) // 2,
+                bg_rect.top() + (bg_rect.height() - indicator_height) // 2,
+                inner_width,
+                indicator_height
+            )
+            shadow_rect = QRect(indicator_rect)
+            shadow_rect.translate(1, 1)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 25))
+            painter.drawRoundedRect(shadow_rect, 4, 4)
+            painter.setPen(QColor("#D4D7DE"))
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.drawRoundedRect(indicator_rect, 4, 4)
+            pen = QPen(QColor("#606266"))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            cx = indicator_rect.center().x()
+            cy = indicator_rect.center().y()
+            margin = 4
+            painter.drawLine(
+                indicator_rect.left() + margin,
+                cy,
+                indicator_rect.right() - margin,
+                cy
+            )
+            if not item.isExpanded():
+                painter.drawLine(
+                    cx,
+                    indicator_rect.top() + margin,
+                    cx,
+                    indicator_rect.bottom() - margin
+                )
+
+        separator_x = separator_offset - 4
+        painter.setPen(QColor("#E4E7ED"))
+        painter.drawLine(separator_x, bg_rect.top() + 4, separator_x, bg_rect.bottom() - 4)
+
         # Color & Icon
         color_code = self.icon_colors.get("Default")
-        if "Excel" in tool_name: color_code = self.icon_colors["OpenExcel"]
-        elif "变量" in tool_name: color_code = self.icon_colors["SetVariable"]
-        elif "日志" in tool_name: color_code = self.icon_colors["PrintLog"]
-        elif "循环" in tool_name: color_code = self.icon_colors["Loop"]
-        elif "浏览器" in tool_name or "元素" in tool_name: color_code = self.icon_colors["OpenBrowser"]
+        if "Excel" in tool_name:
+            color_code = self.icon_colors["OpenExcel"]
+        elif "变量" in tool_name:
+            color_code = self.icon_colors["SetVariable"]
+        elif "日志" in tool_name:
+            color_code = self.icon_colors["PrintLog"]
+        elif "循环" in tool_name:
+            color_code = self.icon_colors["Loop"]
+        elif "浏览器" in tool_name or "元素" in tool_name:
+            color_code = self.icon_colors["OpenBrowser"]
+        elif "备注" in tool_name:
+            color_code = "#67C23A"
         
         # Icon Box
         icon_rect = QRect(content_rect.left(), content_rect.top() + (content_rect.height()-32)//2, 32, 32)
@@ -596,7 +780,6 @@ class StepItemDelegate(QStyledItemDelegate):
         painter.setPen(Qt.NoPen)
         painter.drawRoundedRect(icon_rect, 6, 6)
         
-        # Icon Text
         painter.setPen(Qt.white)
         font = painter.font()
         font.setBold(True)
@@ -604,33 +787,57 @@ class StepItemDelegate(QStyledItemDelegate):
         painter.setFont(font)
         painter.drawText(icon_rect, Qt.AlignCenter, tool_name[0] if tool_name else "?")
         
-        # Title
-        title_rect = QRect(icon_rect.right() + 12, content_rect.top() + 4, content_rect.width() - 50, 20)
-        font.setPointSize(9)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QColor("#303133"))
-        painter.drawText(title_rect, Qt.AlignVCenter | Qt.AlignLeft, tool_name)
-        
-        # Params
         param_str = ""
         if isinstance(params, dict):
-            items = []
-            for k, v in params.items():
-                items.append(f"{k}={v}")
-            param_str = " ".join(items)
+            if "备注" in tool_name and "text" in params:
+                param_str = str(params.get("text", ""))
+            else:
+                items = []
+                for k, v in params.items():
+                    items.append(f"{k}={v}")
+                param_str = " ".join(items)
         
-        subtitle_rect = QRect(icon_rect.right() + 12, title_rect.bottom() + 4, content_rect.width() - 50, 16)
-        font.setBold(False)
-        font.setPointSize(8)
-        painter.setFont(font)
-        painter.setPen(QColor("#909399"))
+        if "备注" in tool_name:
+            text_top = content_rect.top()
+            subtitle_rect = QRect(icon_rect.right() + 12, text_top, content_rect.width() - 50, content_rect.height())
+            font.setBold(False)
+            font.setPointSize(9)
+            painter.setFont(font)
+            painter.setPen(QColor("#67C23A"))
+        else:
+            title_rect = QRect(icon_rect.right() + 12, content_rect.top() + 4, content_rect.width() - 50, 20)
+            font.setPointSize(9)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QColor("#303133"))
+            painter.drawText(title_rect, Qt.AlignVCenter | Qt.AlignLeft, tool_name)
+            subtitle_rect = QRect(icon_rect.right() + 12, title_rect.bottom() + 4, content_rect.width() - 50, 16)
+            font.setBold(False)
+            font.setPointSize(8)
+            painter.setFont(font)
+            painter.setPen(QColor("#909399"))
         
         fm = painter.fontMetrics()
         elided_params = fm.elidedText(param_str, Qt.ElideRight, subtitle_rect.width())
         painter.drawText(subtitle_rect, Qt.AlignVCenter | Qt.AlignLeft, elided_params)
 
         painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if event.type() == QEvent.MouseButtonRelease and event.button() == Qt.LeftButton:
+            tree = self.parent()
+            item = tree.itemFromIndex(index)
+            if not item:
+                return False
+            if item.childCount() > 0:
+                indicator_width = 20
+                number_width = 40
+                rect = option.rect
+                indicator_rect = QRect(4 + number_width, rect.top(), indicator_width, rect.height())
+                if indicator_rect.contains(event.pos()):
+                    item.setExpanded(not item.isExpanded())
+                    return True
+        return QStyledItemDelegate.editorEvent(self, event, model, option, index)
 
 class LogSignalHandler(QObject, logging.Handler):
     new_record = Signal(str, str, str) # Time, Level, Message
@@ -807,7 +1014,10 @@ class MainWindow(QMainWindow):
         self.workflow_tree.internal_move.connect(self.handle_internal_move)
         self.workflow_tree.setItemDelegate(StepItemDelegate(self.workflow_tree))
         self.workflow_tree.setUniformRowHeights(False)
-        self.workflow_tree.setStyleSheet("QTreeWidget { border: none; }")
+        self.workflow_tree.setStyleSheet("""
+            QTreeWidget { border: none; }
+            QTreeView::branch { image: none; }
+        """)
         try:
             if hasattr(self, "handle_item_collapsed"):
                 self.workflow_tree.itemCollapsed.connect(self.handle_item_collapsed)
@@ -889,25 +1099,30 @@ class MainWindow(QMainWindow):
         def add_vars_from_item(it, into):
             d = it.data(0, Qt.UserRole) or {}
             tname = d.get("tool_name")
-            p = d.get("params", {}) or {}
-            for k, v in p.items():
+            params = d.get("params", {}) or {}
+            for k, v in params.items():
                 if isinstance(v, str) and v and (k.endswith("output_variable") or k.endswith("_variable") or k in ("output_variable","driver_variable","item_variable","list_variable")):
-                    # Determine type
+                    # Determine type based on tool name and parameter key
                     v_type = "一般变量"
-                    if k == "output_variable":
-                        if tname == "Open Browser": v_type = "网页对象"
-                        elif tname == "Open Excel": v_type = "Excel对象"
-                    elif k == "driver_variable":
-                         # If it's a usage, we can't be sure if it's defined as such, but we can hint it
-                         # But better to leave it as is if already defined. 
-                         # If not defined, assume it's a web object because it's used as one.
-                         if v not in into: v_type = "网页对象"
-                         else: continue # Already defined
+                    if k == "driver_variable":
+                        v_type = "网页对象"
+                    elif k == "alias" and "Excel" in tname:
+                        v_type = "Excel对象"
+                    elif k == "excel_variable":
+                        v_type = "Excel对象"
+                    elif k == "item_variable":
+                        v_type = "循环项"
+                    elif k == "index_variable":
+                        v_type = "循环变量"
+                    elif k == "output_variable":
+                        if tname in ["打开浏览器", "Open Browser"]: v_type = "网页对象"
+                        elif tname in ["打开 Excel", "Open Excel"]: v_type = "Excel对象"
+                        elif tname in ["等待元素", "获取元素", "获取元素信息", "保存元素", "Wait Element", "Get Element Info", "Save Element"]: v_type = "网页元素"
                     
                     if v not in into:
                         into[v] = v_type
                     elif into[v] == "一般变量" and v_type != "一般变量":
-                        # Upgrade type if we found a better definition
+                        # Upgrade type if we found a more specific definition
                         into[v] = v_type
 
         vars_map = {}
@@ -1067,6 +1282,8 @@ class MainWindow(QMainWindow):
         self.refresh_saved_workflows_list()
 
     def refresh_saved_workflows_list(self):
+        if not hasattr(self, "saved_workflows_tree"):
+            return
         self.saved_workflows_tree.clear()
         workflows = self.workflow_manager.list_workflows()
         
@@ -1226,7 +1443,38 @@ class MainWindow(QMainWindow):
         data = item.data(0, Qt.UserRole)
         if data == "tool":
             tool_name = item.text(0)
-            self.add_step(tool_name)
+            target = None
+            indicator = None
+            if hasattr(self, "workflow_tree"):
+                target = self.workflow_tree.currentItem()
+                if target:
+                    t_data = target.data(0, Qt.UserRole) or {}
+                    t_name = t_data.get("tool_name")
+                    if t_name == "EndMarker":
+                        parent = target.parent()
+                        if parent:
+                            idx = parent.indexOfChild(target)
+                            logic_item = parent.child(idx - 1) if idx > 0 else None
+                        else:
+                            idx = self.workflow_tree.indexOfTopLevelItem(target)
+                            logic_item = self.workflow_tree.topLevelItem(idx - 1) if idx > 0 else None
+                        if logic_item:
+                            target = logic_item
+                            indicator = QAbstractItemView.OnItem
+                    elif t_name in LOGIC_TOOLS:
+                        indicator = QAbstractItemView.OnItem
+                    else:
+                        parent = target.parent()
+                        if parent:
+                            p_data = parent.data(0, Qt.UserRole) or {}
+                            if p_data.get("tool_name") in LOGIC_TOOLS:
+                                indicator = QAbstractItemView.BelowItem
+                        if indicator is None:
+                            indicator = QAbstractItemView.BelowItem
+            if target:
+                self.add_step(tool_name, target, indicator)
+            else:
+                self.add_step(tool_name)
 
     def handle_toolbox_item_clicked(self, item, column):
         data = item.data(0, Qt.UserRole)
@@ -1388,6 +1636,8 @@ class MainWindow(QMainWindow):
         if target_item:
             parent = target_item.parent()
             if indicator == QAbstractItemView.OnItem:
+                if tool_name in LOGIC_TOOLS:
+                    item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
                 target_item.addChild(item)
                 target_item.setExpanded(True)
             elif indicator == QAbstractItemView.AboveItem:
@@ -1407,6 +1657,7 @@ class MainWindow(QMainWindow):
         else:
             self.workflow_tree.addTopLevelItem(item)
         if tool_name in LOGIC_TOOLS:
+            item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
             end_item = QTreeWidgetItem([f"结束 {tool_name}"])
             end_item.setData(0, Qt.UserRole, {"tool_name": "EndMarker", "params": {}})
             end_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -1419,6 +1670,7 @@ class MainWindow(QMainWindow):
                 self.workflow_tree.insertTopLevelItem(index + 1, end_item)
             item.setExpanded(True)
         self.create_undo_snapshot()
+        self.refresh_logic_visibility()
 
     def show_context_menu(self, pos):
         item = self.workflow_tree.itemAt(pos)
@@ -1495,74 +1747,76 @@ class MainWindow(QMainWindow):
         self.edit_step(item)
 
     def handle_item_collapsed(self, item):
-        data = item.data(0, Qt.UserRole) or {}
-        name = data.get("tool_name")
-        if not name or name not in LOGIC_TOOLS:
-            return
-        parent = item.parent()
-        if parent:
-            idx = parent.indexOfChild(item)
-            if idx + 1 < parent.childCount():
-                sib = parent.child(idx + 1)
-                sdata = sib.data(0, Qt.UserRole) or {}
-                if sdata.get("tool_name") == "EndMarker":
-                    sib.setHidden(True)
-        else:
-            idx = self.workflow_tree.indexOfTopLevelItem(item)
-            if idx + 1 < self.workflow_tree.topLevelItemCount():
-                sib = self.workflow_tree.topLevelItem(idx + 1)
-                sdata = sib.data(0, Qt.UserRole) or {}
-                if sdata.get("tool_name") == "EndMarker":
-                    sib.setHidden(True)
+        self.refresh_logic_visibility()
 
     def handle_item_expanded(self, item):
-        data = item.data(0, Qt.UserRole) or {}
-        name = data.get("tool_name")
-        if not name or name not in LOGIC_TOOLS:
-            return
-        parent = item.parent()
-        if parent:
-            idx = parent.indexOfChild(item)
-            if idx + 1 < parent.childCount():
-                sib = parent.child(idx + 1)
-                sdata = sib.data(0, Qt.UserRole) or {}
-                if sdata.get("tool_name") == "EndMarker":
-                    sib.setHidden(False)
-        else:
-            idx = self.workflow_tree.indexOfTopLevelItem(item)
-            if idx + 1 < self.workflow_tree.topLevelItemCount():
-                sib = self.workflow_tree.topLevelItem(idx + 1)
-                sdata = sib.data(0, Qt.UserRole) or {}
-                if sdata.get("tool_name") == "EndMarker":
-                    sib.setHidden(False)
+        self.refresh_logic_visibility()
     def get_workflow_data(self):
+        self._line_counter = 0
         return self.get_items_data(self.workflow_tree.invisibleRootItem())
 
     def get_items_data(self, parent_item):
         steps = []
         for i in range(parent_item.childCount()):
             item = parent_item.child(i)
-            data = item.data(0, Qt.UserRole)
-            
-            if data.get("tool_name") == "EndMarker":
-                continue
-                
+            data = item.data(0, Qt.UserRole) or {}
+            tool_name = data.get("tool_name")
+            line = None
+            if hasattr(self, "_line_counter"):
+                self._line_counter += 1
+                line = self._line_counter
             step_data = {
-                "tool_name": data["tool_name"],
-                "params": data["params"],
+                "tool_name": tool_name,
+                "params": data.get("params", {}),
                 "disabled": bool(data.get("disabled", False)),
                 "children": self.get_items_data(item)
             }
+            if line is not None:
+                step_data["line"] = line
             steps.append(step_data)
         return steps
 
+    def refresh_logic_visibility(self):
+        root = self.workflow_tree.invisibleRootItem()
+
+        def process(parent):
+            stack = []
+            for i in range(parent.childCount()):
+                it = parent.child(i)
+                d = it.data(0, Qt.UserRole) or {}
+                name = d.get("tool_name")
+                hidden = any(not logic.isExpanded() for logic in stack)
+                if name in LOGIC_TOOLS:
+                    it.setHidden(hidden)
+                    stack.append(it)
+                elif name == "EndMarker":
+                    it.setHidden(hidden)
+                    if stack:
+                        stack.pop()
+                else:
+                    it.setHidden(hidden)
+            for i in range(parent.childCount()):
+                child = parent.child(i)
+                if child.childCount() > 0:
+                    process(child)
+
+        process(root)
+
     def load_workflow_to_tree(self, workflow_data, parent_item=None):
+        if not isinstance(workflow_data, list):
+            print(f"Warning: Expected list for workflow_data, got {type(workflow_data)}")
+            return
+            
         if parent_item is None:
             parent_item = self.workflow_tree.invisibleRootItem()
             
         for step in workflow_data:
+            if step.get("tool_name") == "EndMarker":
+                continue
             item = QTreeWidgetItem([step["tool_name"]])
             item.setData(0, Qt.UserRole, {"tool_name": step["tool_name"], "params": step["params"]})
+            if step["tool_name"] in LOGIC_TOOLS:
+                item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
             parent_item.addChild(item)
             
             if step.get("children"):
@@ -1575,6 +1829,7 @@ class MainWindow(QMainWindow):
                 parent_item.addChild(end_item)
             
             item.setExpanded(True)
+        self.refresh_logic_visibility()
 
     def toggle_schedule(self):
         job_id = "daily_workflow_job"
@@ -1647,11 +1902,13 @@ class MainWindow(QMainWindow):
         try:
             self.engine.load_workflow(workflow_data, ENGINE_REGISTRY)
             
-            # Inject element managers
-            self.engine.context["element_manager_private"] = self.private_element_manager
-            self.engine.context["element_manager_global"] = self.global_element_manager
+            # Prepare initial context with element managers
+            initial_context = {
+                "element_manager_private": self.private_element_manager,
+                "element_manager_global": self.global_element_manager
+            }
             
-            self.engine.run()
+            self.engine.run(initial_context=initial_context)
             # UI updates must be done via signals or slots, but status_label setText is not thread safe?
             # Actually PySide6 signals are thread safe.
             # But setText directly is not.

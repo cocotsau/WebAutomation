@@ -20,8 +20,8 @@ class OpenExcelAction(ActionBase):
     
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "file_path", "label": "文件路径", "type": "string"},
-            {"name": "alias", "label": "会话别名", "type": "string", "default": "default"},
+            {"name": "file_path", "label": "文件路径", "type": "string", "ui_options": {"browse_type": "file"}},
+            {"name": "alias", "label": "会话别名", "type": "string", "default": "default", "variable_type": "Excel对象"},
             {"name": "data_only", "label": "只读取数值(忽略公式)", "type": "bool", "default": True},
             {"name": "read_only", "label": "只读模式", "type": "bool", "default": False}
         ]
@@ -62,11 +62,11 @@ class ReadExcelAction(ActionBase):
     
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "alias", "label": "会话别名", "type": "string", "default": "default"},
+            {"name": "alias", "label": "会话别名", "type": "string", "default": "default", "variable_type": "Excel对象"},
             {"name": "sheet_name", "label": "Sheet 名称 (空则当前)", "type": "string", "default": "", "advanced": True},
             {"name": "read_type", "label": "读取类型", "type": "string", "default": "Cell", "options": ["Cell", "Range", "Sheet"]},
             {"name": "address", "label": "地址 (如 A1 或 A1:B2)", "type": "string", "default": "A1"},
-            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "excel_data"}
+            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "excel_data", "variable_type": "一般变量"}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:
@@ -154,9 +154,9 @@ class GetExcelRowCountAction(ActionBase):
     
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "alias", "label": "会话别名", "type": "string", "default": "default"},
+            {"name": "alias", "label": "会话别名", "type": "string", "default": "default", "variable_type": "Excel对象"},
             {"name": "sheet_name", "label": "Sheet 名称 (空则使用当前)", "type": "string", "default": ""},
-            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "row_count"}
+            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "row_count", "variable_type": "一般变量"}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:
@@ -199,7 +199,7 @@ class WriteExcelAction(ActionBase):
     
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "alias", "label": "会话别名", "type": "string", "default": "default"},
+            {"name": "alias", "label": "会话别名", "type": "string", "default": "default", "variable_type": "Excel对象"},
             {"name": "sheet_name", "label": "Sheet 名称 (空则当前)", "type": "string", "default": "", "advanced": True},
             {"name": "write_type", "label": "写入类型", "type": "string", "default": "Cell", "options": ["Cell", "Range"]},
             {"name": "address", "label": "地址 (如 A1)", "type": "string", "default": "A1"},
@@ -309,8 +309,8 @@ class SaveExcelAction(ActionBase):
     
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "alias", "label": "会话别名", "type": "string", "default": "default"},
-            {"name": "file_path", "label": "另存为路径 (空则覆盖原文件)", "type": "string", "default": ""}
+            {"name": "alias", "label": "会话别名", "type": "string", "default": "default", "variable_type": "Excel对象"},
+            {"name": "file_path", "label": "另存为路径 (空则覆盖原文件)", "type": "string", "default": "", "ui_options": {"browse_type": "file", "file_filter": "Excel Files (*.xlsx *.xls)"}}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:
@@ -342,40 +342,11 @@ class CloseExcelAction(ActionBase):
     
     @property
     def description(self) -> str:
-        return "关闭 Excel 会话。"
-    
-    def get_param_schema(self) -> List[Dict[str, Any]]:
-        return [
-            {"name": "alias", "label": "会话别名", "type": "string", "default": "default"}
-        ]
-    
-    def execute(self, context: Dict[str, Any]) -> bool:
-        alias = self.params.get("alias", "default")
-        
-        if alias not in EXCEL_SESSIONS:
-            return True # Already closed or not exists
-            
-        try:
-            session = EXCEL_SESSIONS.pop(alias)
-            session["wb"].close()
-            print(f"[CloseExcel] Closed session '{alias}'")
-            return True
-        except Exception as e:
-            print(f"[CloseExcel] Error: {e}")
-            return False
-
-class CloseExcelAction(ActionBase):
-    @property
-    def name(self) -> str:
-        return "关闭 Excel"
-    
-    @property
-    def description(self) -> str:
         return "保存并关闭 Excel 会话。"
     
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "alias", "label": "会话别名", "type": "string", "default": "default"},
+            {"name": "alias", "label": "会话别名", "type": "string", "default": "default", "variable_type": "Excel对象"},
             {"name": "save", "label": "是否保存", "type": "bool", "default": True}
         ]
     
@@ -397,7 +368,7 @@ class CloseExcelAction(ActionBase):
             
             wb.close()
             del EXCEL_SESSIONS[alias]
-            print(f"[CloseExcel] Closed session '{alias}'.")
+            print(f"[CloseExcel] Closed session '{alias}'")
             return True
         except Exception as e:
             print(f"[CloseExcel] Error: {e}")

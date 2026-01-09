@@ -72,14 +72,24 @@ class Web:
             raise
     
     @staticmethod
-    def wait_element_hide(driver, locator: tuple, timeout: int = 20):
-        print(f"等待元素隐藏: {locator[0]}='{locator[1]}', 超时: {timeout}秒")
+    def wait_element_hide(driver, locator: tuple | None = None, element=None, timeout: int = 20):
         try:
-            result = WebDriverWait(driver, timeout).until(EC.invisibility_of_element_located(locator))
-            print(f"元素隐藏成功: {locator[0]}='{locator[1]}'")
-            return result
+            if element is not None:
+                print(f"等待元素隐藏: WebElement, 超时: {timeout}秒")
+                result = WebDriverWait(driver, timeout).until(lambda d: not element.is_displayed())
+                print("元素隐藏成功")
+                return result
+            if locator is not None:
+                print(f"等待元素隐藏: {locator[0]}='{locator[1]}', 超时: {timeout}秒")
+                result = WebDriverWait(driver, timeout).until(EC.invisibility_of_element_located(locator))
+                print(f"元素隐藏成功: {locator[0]}='{locator[1]}'")
+                return result
+            raise ValueError("必须提供 locator 或 element")
         except Exception as e:
-            print(f"元素隐藏失败: {locator[0]}='{locator[1]}', 错误: {e}")
+            if locator is not None:
+                print(f"元素隐藏失败: {locator[0]}='{locator[1]}', 错误: {e}")
+            else:
+                print(f"元素隐藏失败, 错误: {e}")
             raise
 
     @staticmethod
@@ -424,3 +434,38 @@ class Web:
                 else:
                     raise Exception("未找到目标窗口句柄")
         return False
+
+    @staticmethod
+    def get_first_visible(elements: list):
+        """
+        从元素列表中查找第一个可见元素
+        """
+        try:
+            return next((el for el in elements if el.is_displayed()), None)
+        except Exception as e:
+            print(f"检查元素可见性失败: {e}")
+            return None
+
+    @staticmethod
+    def find_child(element, xpath: str):
+        """
+        查找指定元素下的第一个子元素 (仅支持 XPATH)
+        """
+        try:
+            relative_xpath = xpath if xpath.startswith(".") else f".{xpath}"
+            return element.find_element(By.XPATH, relative_xpath)
+        except Exception as e:
+            print(f"查找子元素失败: {e}")
+            return None
+
+    @staticmethod
+    def find_children(element, xpath: str):
+        """
+        查找指定元素下的所有子元素 (仅支持 XPATH)
+        """
+        try:
+            relative_xpath = xpath if xpath.startswith(".") else f".{xpath}"
+            return element.find_elements(By.XPATH, relative_xpath)
+        except Exception as e:
+            print(f"查找子元素列表失败: {e}")
+            return []

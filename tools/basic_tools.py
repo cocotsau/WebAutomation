@@ -27,7 +27,7 @@ class FileDialogAction(ActionBase):
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
             {"name": "prompt", "label": "提示信息", "type": "string", "default": "请选择文件"},
-            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "file_path"}
+            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "file_path", "variable_type": "一般变量", "is_variable": True}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:
@@ -65,7 +65,7 @@ class InputDialogAction(ActionBase):
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
             {"name": "prompt", "label": "标题/提示", "type": "string", "default": "请输入"},
-            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "input_value"}
+            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "input_value", "variable_type": "一般变量", "is_variable": True}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:
@@ -102,7 +102,7 @@ class CalculateAction(ActionBase):
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
             {"name": "expression", "label": "表达式 (支持变量)", "type": "string"},
-            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "result"}
+            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "result", "variable_type": "一般变量", "is_variable": True}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:
@@ -148,6 +148,24 @@ class PrintLogAction(ActionBase):
             {"name": "message", "type": "str", "label": "Message", "default": "Hello World"}
         ]
 
+
+class CommentAction(ActionBase):
+    @property
+    def name(self) -> str:
+        return "备注"
+    
+    @property
+    def description(self) -> str:
+        return "仅用于在流程中添加说明，不参与执行。"
+    
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "text", "label": "备注内容", "type": "text", "default": ""},
+        ]
+    
+    def execute(self, context: Dict[str, Any]) -> bool:
+        return True
+
 class DelayAction(ActionBase):
     @property
     def name(self) -> str:
@@ -176,36 +194,51 @@ class DelayAction(ActionBase):
 class SetVariableAction(ActionBase):
     @property
     def name(self) -> str:
-        return "Set Variable"
+        return "设置变量"
         
     @property
     def description(self) -> str:
-        return "Sets a variable in the context. Supports JSON for lists/dicts."
+        return "设置上下文中的变量，支持多种数据类型。"
         
     def execute(self, context: Dict[str, Any]) -> bool:
-        key = self.params.get("key")
+        output_var = self.params.get("output_variable")
         value = self.params.get("value")
+        value_type = self.params.get("value_type", "string")
         
-        if not key:
+        if not output_var:
             return False
-            
-        # Try to parse JSON if it looks like a structure
+        
         real_value = value
         if isinstance(value, str):
-            value_stripped = value.strip()
-            if (value_stripped.startswith("[") and value_stripped.endswith("]")) or \
-               (value_stripped.startswith("{") and value_stripped.endswith("}")):
+            text = value.strip()
+            if value_type == "string":
+                real_value = value
+            elif value_type == "int":
                 try:
-                    real_value = json.loads(value)
-                except json.JSONDecodeError:
-                    pass # Keep as string
-        
-        context[key] = real_value
-        print(f"[VAR]: Set {key} = {real_value} (Type: {type(real_value).__name__})")
+                    real_value = int(text)
+                except Exception:
+                    real_value = 0
+            elif value_type == "float":
+                try:
+                    real_value = float(text)
+                except Exception:
+                    real_value = 0.0
+            elif value_type == "bool":
+                lowered = text.lower()
+                real_value = lowered in ("1", "true", "yes", "y", "on")
+            elif value_type in ("list", "dict", "any"):
+                try:
+                    import ast
+                    real_value = ast.literal_eval(text)
+                except Exception:
+                    real_value = value
+        context[output_var] = real_value
+        print(f"[VAR]: Set {output_var} = {real_value} (Type: {type(real_value).__name__})")
         return True
         
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "key", "type": "str", "label": "Variable Name", "default": "my_var"},
-            {"name": "value", "type": "str", "label": "Value (String or JSON)", "default": ""}
+            {"name": "output_variable", "type": "str", "label": "变量名", "default": "my_var", "variable_type": "一般变量", "is_variable": True},
+            {"name": "value_type", "type": "str", "label": "数据类型", "default": "string", "options": ["string", "int", "float", "bool", "list", "dict", "any"]},
+            {"name": "value", "type": "str", "label": "变量值", "default": ""}
         ]

@@ -36,37 +36,48 @@ class Engine:
                 continue
             tool_name = step.get("tool_name")
             params = step.get("params", {})
+            line = step.get("line")
+            prefix = f"[步骤 {line}] " if line is not None else ""
             
             # For backward compatibility if 'tool_name' key is missing or different
-            if not tool_name: 
+            if not tool_name:
+                continue
+
+            if tool_name == "EndMarker":
+                self.logger.info(f"{prefix}结束逻辑块")
                 continue
 
             if tool_name in self.tool_registry:
                 action_class = self.tool_registry[tool_name]
                 try:
                     action_instance = action_class(params)
-                    self.logger.info(f"Executing {action_instance.name}")
+                    self.logger.info(f"{prefix}Executing {action_instance.name}")
                     
                     success = action_instance.execute(context)
                     if not success:
-                        self.logger.error(f"Step {tool_name} failed.")
+                        self.logger.error(f"{prefix}Step {tool_name} failed.")
                         return False
                 except (BreakLoopException, ContinueLoopException):
                     raise
                 except Exception as e:
-                    self.logger.exception(f"Exception executing {tool_name}: {e}")
+                    self.logger.exception(f"{prefix}Exception executing {tool_name}: {e}")
                     return False
             else:
-                self.logger.error(f"Tool {tool_name} not found in registry.")
+                self.logger.error(f"{prefix}Tool {tool_name} not found in registry.")
                 return False
         return True
 
-    def run(self):
+    def run(self, initial_context: Dict[str, Any] = None):
         """
         Run the loaded workflow.
         """
         self.logger.info("Starting workflow execution...")
-        self.context = {}  # Reset context
+        
+        # Initialize context with initial_context if provided, else empty
+        if initial_context is not None:
+            self.context = initial_context.copy()
+        else:
+            self.context = {}
         
         # Inject the runner
         self.context["__runner__"] = self.execute_step_data

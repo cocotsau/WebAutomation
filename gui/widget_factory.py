@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt
 
 class WidgetFactory:
     @staticmethod
-    def create_widget(field, current_value, parent_dialog, context_getter=None, tool_name=""):
+    def create_widget(field, current_value, parent_dialog, context_getter=None, tool_name="", variable_picker_callback=None):
         """
         根据字段定义创建对应的控件
         :param field: 字段schema定义
@@ -24,8 +24,18 @@ class WidgetFactory:
         widget = None
         
         # 1. 变量选择控件逻辑
-        # Exclude output_variable for Open Browser/Open Excel (creation vs selection)
-        is_creation = (key == "output_variable" and tool_name in ["打开浏览器", "打开 Excel"])
+        # Exclude output_variable for tools that create/assign variables (creation vs selection)
+        creation_tools = [
+            "打开浏览器", "Open Browser", 
+            "打开 Excel", "Open Excel",
+            "等待元素", "Wait Element",
+            "等待全部元素", "Wait All Elements",
+            "获取第一个可见元素", "Get First Visible",
+            "查找子元素", "Find Child",
+            "查找所有子元素", "Find All Children"
+        ]
+        is_creation = (key == "output_variable" and tool_name in creation_tools)
+        expected_type = field.get("variable_type")
         
         if (key in ['driver_variable', 'output_variable'] or field.get('is_variable', False)) and not is_creation:
             widget = QComboBox()
@@ -38,40 +48,61 @@ class WidgetFactory:
                     pass
             
             if isinstance(avail, (list, set, tuple)):
-                avail = {k: "未知" for k in avail}
+                avail = {k: "一般变量" for k in avail}
+            elif not isinstance(avail, dict):
+                avail = {}
+
+            # Apply type filtering
+            if expected_type:
+                # 严格过滤：如果指定了特殊类型（网页对象、网页元素、Excel对象、循环变量、循环项），则只显示该类型
+                if expected_type in ["网页对象", "网页元素", "Excel对象", "循环变量", "循环项"]:
+                    filtered_avail = {k: v for k, v in avail.items() if v == expected_type}
+                else:
+                    filtered_avail = {k: v for k, v in avail.items() if v == expected_type}
+                
+                if filtered_avail:
+                    avail = filtered_avail
+            elif key == "driver_variable":
+                # 场景控制：如果是驱动变量，默认只显示网页对象
+                filtered_avail = {k: v for k, v in avail.items() if v == "网页对象"}
+                if filtered_avail:
+                    avail = filtered_avail
+            elif "Excel" in tool_name and (key == "alias" or key == "excel_variable"):
+                # 场景控制：Excel 会话
+                filtered_avail = {k: v for k, v in avail.items() if v == "Excel对象"}
+                if filtered_avail:
+                    avail = filtered_avail
             
-            # Determine preferred type
-            preferred_type = None
-            if key == "driver_variable": preferred_type = "网页对象"
-            elif key == "output_variable" and "Browser" in tool_name: preferred_type = "网页对象"
-            elif key == "output_variable" and "Excel" in tool_name: preferred_type = "Excel对象"
-            
-            # Sort variables
+            # Sort variables: Preferred type first, then by type, then by name
             def sort_key(item):
                 name, vtype = item
-                prio = 0 if vtype == preferred_type else 1
+                # Determine priority based on key name if expected_type is missing
+                prio = 1
+                if expected_type:
+                    prio = 0 if vtype == expected_type else 1
+                elif key == "driver_variable" and vtype == "网页对象":
+                    prio = 0
+                elif key == "output_variable" and "Excel" in tool_name and vtype == "Excel对象":
+                    prio = 0
                 return (prio, vtype, name)
             
             sorted_vars = sorted(avail.items(), key=sort_key)
             
             for name, vtype in sorted_vars:
-                widget.addItem(name, vtype)
+                widget.addItem(f"{name} ({vtype})", name)
                 widget.setItemData(widget.count()-1, f"类型: {vtype}", Qt.ToolTipRole)
-            
-            if "Web Page" not in avail:
-                widget.addItem("Web Page")
             
             # Smart Default Selection
             current_text = str(val)
-            if key == 'driver_variable' and not current_text:
-                 candidates = [n for n, t in avail.items() if t == "网页对象"]
-                 if candidates:
-                     current_text = sorted(candidates)[0]
-                 else:
-                     # Fallback
-                     candidates = [n for n, t in avail.items() if t not in ("循环变量", "循环项")]
-                     if candidates:
-                         current_text = sorted(candidates)[0]
+            if not current_text:
+                if key == 'driver_variable':
+                    candidates = [n for n, t in avail.items() if t == "网页对象"]
+                    if candidates:
+                        current_text = sorted(candidates)[0]
+                elif expected_type:
+                    candidates = [n for n, t in avail.items() if t == expected_type]
+                    if candidates:
+                        current_text = sorted(candidates)[0]
 
             widget.setCurrentText(current_text)
             
@@ -150,9 +181,9 @@ class WidgetFactory:
         return container
 
     @staticmethod
-    def open_variable_picker(parent_dialog, target_widget, context_getter=None):
+    def open_variable_picker(parent_dialog, target_widget, context_getter=None, expected_type=None):
         dlg = QDialog(parent_dialog)
-        dlg.setWindowTitle("选择流程变量")
+        dlg.setWindowTitle(f"选择流程变量 {'('+expected_type+')' if expected_type else ''}")
         v = QVBoxLayout(dlg)
         search = QLineEdit()
         search.setPlaceholderText("搜索变量...")
@@ -166,7 +197,24 @@ class WidgetFactory:
             except:
                 pass
         if isinstance(avail, (list, set, tuple)):
-            avail = {k: "未知" for k in avail}
+            avail = {k: "一般变量" for k in avail}
+        
+        # 过滤类型
+        if expected_type and isinstance(avail, dict):
+            if expected_type in ["网页对象", "网页元素", "Excel对象", "循环变量", "循环项"]:
+                filtered = {k: v for k, v in avail.items() if v == expected_type}
+            else:
+                filtered = {k: v for k, v in avail.items() if v == expected_type}
+            if filtered:
+                avail = filtered
+        elif isinstance(avail, dict):
+            # 默认逻辑：如果不是明确指定类型，但根据字段名可以推断
+            target_widget_name = ""
+            if hasattr(target_widget, "objectName"):
+                target_widget_name = target_widget.objectName()
+            
+            # 这里逻辑稍微复杂点，如果能拿到字段名最好，拿不到就显示全部
+            pass
 
         def populate_list(filter_text=""):
             lst.clear()

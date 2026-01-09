@@ -6,12 +6,13 @@ from PIL import Image
 from core.action_base import ActionBase
 from utils.file_tools import FileTools
 from utils.img_ocr import ImgOcr
+from utils.img_tools import ImgTools
 from utils.notice import WeChatNotification
 
 class WaitForFileAndCopyAction(ActionBase):
     @property
     def name(self) -> str:
-        return "Wait & Copy File"
+        return "等待并复制文件"
     
     @property
     def description(self) -> str:
@@ -19,8 +20,8 @@ class WaitForFileAndCopyAction(ActionBase):
     
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "source_dir", "label": "Source Directory (Watch)", "type": "string"},
-            {"name": "dest_path", "label": "Destination File Path", "type": "string"}
+            {"name": "source_dir", "label": "Source Directory (Watch)", "type": "string", "ui_options": {"browse_type": "directory"}},
+            {"name": "dest_path", "label": "Destination File Path", "type": "string", "ui_options": {"browse_type": "file_save"}}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:
@@ -33,7 +34,7 @@ class WaitForFileAndCopyAction(ActionBase):
 class ClearDirectoryAction(ActionBase):
     @property
     def name(self) -> str:
-        return "Clear Directory"
+        return "清空目录"
     
     @property
     def description(self) -> str:
@@ -41,7 +42,7 @@ class ClearDirectoryAction(ActionBase):
     
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "directory", "label": "Directory Path", "type": "string"}
+            {"name": "directory", "label": "Directory Path", "type": "string", "ui_options": {"browse_type": "directory"}}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:
@@ -54,41 +55,82 @@ class ClearDirectoryAction(ActionBase):
 class OCRImageAction(ActionBase):
     @property
     def name(self) -> str:
-        return "OCR Image"
+        return "OCR 文字识别"
     
     @property
     def description(self) -> str:
-        return "Recognizes text in an image."
+        return "识别图片中的文字（支持本地路径或 Base64 字符串）。"
     
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "image_path", "label": "Image Path", "type": "string"},
-            {"name": "output_variable", "label": "Output Variable Name", "type": "string", "default": "ocr_text"}
+            {"name": "image_path", "label": "图片路径 (可选)", "type": "string", "default": "", "ui_options": {"browse_type": "file"}},
+            {"name": "base64_str", "label": "Base64 字符串 (可选)", "type": "string", "default": ""},
+            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "ocr_text", "variable_type": "一般变量"}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:
-        path = self.params.get("image_path")
+        image_path = self.params.get("image_path", "")
+        base64_str = self.params.get("base64_str", "")
         output_var = self.params.get("output_variable", "ocr_text")
         
-        if not path or not os.path.exists(path):
-            print(f"[OCR] Image not found: {path}")
-            return False
-            
+        # 变量替换
         try:
-            with Image.open(path) as img:
-                ocr = ImgOcr()
-                text = ocr.recognize(img)
-                context[output_var] = text
-                print(f"[OCR] Result: {text}")
-                return True
+            if image_path:
+                image_path = image_path.format(**context)
+            if base64_str:
+                base64_str = base64_str.format(**context)
+        except Exception:
+            pass
+            
+        img = None
+        try:
+            # 智能识别输入源：优先处理显式 Base64，或者判断 image_path 是否包含 Base64 特征
+            source = base64_str or image_path
+            if not source:
+                print("[OCR] 未提供图片路径或 Base64 字符串")
+                return False
+
+            # 判断是否为 Base64 (包含 data URI 前缀或长度较长且不包含路径分隔符)
+            is_base64 = "base64," in source or (len(source) > 200 and not os.path.exists(source))
+            
+            if is_base64:
+                img = ImgTools.base64_to_png(source)
+                if not img:
+                    msg = f"[OCR] Base64 转换图片失败: {source}"
+                    if len(msg) > 100: msg = msg[:100] + "...(数据过长已截断)"
+                    print(msg)
+                    return False
+            else:
+                if not os.path.exists(source):
+                    print(f"[OCR] 图片文件不存在: {source}")
+                    return False
+                img = Image.open(source)
+                
+            # 调用 img_ocr 中的 recognize
+            ocr = ImgOcr()
+            text = ocr.recognize(img)
+            
+            # 最终输出验证码字符串
+            context[output_var] = text
+            
+            # 日志截断处理
+            log_msg = f"[OCR] 识别结果: {text}"
+            if len(log_msg) > 100:
+                log_msg = log_msg[:100] + "\n...（日志信息过长，已截断）"
+            print(log_msg)
+            return True
+            
         except Exception as e:
-            print(f"[OCR] Error: {e}")
+            error_msg = f"[OCR] 识别出错: {e}"
+            if len(error_msg) > 100:
+                error_msg = error_msg[:100] + "\n...（日志信息过长，已截断）"
+            print(error_msg)
             return False
 
 class WeChatNotifyAction(ActionBase):
     @property
     def name(self) -> str:
-        return "WeChat Notify"
+        return "微信通知"
     
     @property
     def description(self) -> str:
@@ -129,7 +171,7 @@ class ExtractContentAction(ActionBase):
         return [
             {"name": "text", "label": "目标文本", "type": "string"},
             {"name": "pattern", "label": "正则表达式", "type": "string"},
-            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "extracted_content"}
+            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "extracted_content", "variable_type": "一般变量"}
         ]
     
     def execute(self, context: Dict[str, Any]) -> bool:

@@ -14,6 +14,7 @@ class LoopAction(ActionBase):
 
     def execute(self, context: Dict[str, Any]) -> bool:
         count = int(self.params.get("count", 1))
+        index_name = self.params.get("index_variable", "loop_index")
         children = self.params.get("children", [])
         runner = context.get("__runner__")
         
@@ -24,7 +25,7 @@ class LoopAction(ActionBase):
         print(f"[Loop] Starting loop {count} times.")
         for i in range(count):
             print(f"[Loop] Iteration {i+1}/{count}")
-            context['loop_index'] = i
+            context[index_name] = i
             try:
                 if not runner(children, context):
                     return False
@@ -39,7 +40,8 @@ class LoopAction(ActionBase):
 
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "count", "type": "int", "label": "Iterations", "default": 3}
+            {"name": "count", "type": "int", "label": "循环次数", "default": 3},
+            {"name": "index_variable", "type": "str", "label": "索引变量名", "default": "loop_index", "variable_type": "循环变量"}
         ]
 
 class ForEachAction(ActionBase):
@@ -54,13 +56,18 @@ class ForEachAction(ActionBase):
     def execute(self, context: Dict[str, Any]) -> bool:
         var_name = self.params.get("list_variable")
         item_name = self.params.get("item_variable", "item")
+        index_name = self.params.get("index_variable", "loop_index")
         children = self.params.get("children", [])
         runner = context.get("__runner__")
 
         if not runner:
             return False
             
-        data_list = context.get(var_name, [])
+        list_var_name = var_name
+        if isinstance(list_var_name, str) and list_var_name.startswith("{") and list_var_name.endswith("}"):
+            list_var_name = list_var_name[1:-1]
+
+        data_list = context.get(list_var_name, [])
         if not isinstance(data_list, list):
             print(f"[ForEach] Error: Variable '{var_name}' is not a list or not found.")
             return False
@@ -69,7 +76,7 @@ class ForEachAction(ActionBase):
         for i, item in enumerate(data_list):
             print(f"[ForEach] Item {i+1}: {item}")
             context[item_name] = item
-            context['loop_index'] = i
+            context[index_name] = i
             try:
                 if not runner(children, context):
                     return False
@@ -84,8 +91,9 @@ class ForEachAction(ActionBase):
 
     def get_param_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "list_variable", "type": "str", "label": "List Variable Name", "default": "my_list"},
-            {"name": "item_variable", "type": "str", "label": "Item Variable Name", "default": "item"}
+            {"name": "list_variable", "type": "str", "label": "列表变量名", "default": "my_list", "variable_type": "一般变量", "is_variable": True},
+            {"name": "item_variable", "type": "str", "label": "循环项变量名", "default": "item", "variable_type": "循环项", "is_variable": True},
+            {"name": "index_variable", "type": "str", "label": "索引变量名", "default": "loop_index", "variable_type": "循环变量", "is_variable": True}
         ]
 
 class WhileAction(ActionBase):

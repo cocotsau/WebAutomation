@@ -56,7 +56,7 @@ class WorkflowManager:
             if os.path.isdir(group_path):
                 workflows = []
                 for file_name in os.listdir(group_path):
-                    if file_name.endswith(".json"):
+                    if file_name.endswith(".json") and not file_name.endswith(".elements.json"):
                         workflows.append(file_name[:-5])  # Remove .json
                 if workflows:
                     result[group_name] = workflows
