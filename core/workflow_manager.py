@@ -103,10 +103,10 @@ def compute_logic_hierarchy(steps, strict: bool = False):
 
             if name in LOGIC_LOOP_TOOLS or name in if_tools:
                 children_source: List[Dict[str, Any]] = []
-                if isinstance(step.get("children"), list):
-                    children_source = step.get("children") or []
-                elif isinstance(params.get("children"), list):
+                if isinstance(params.get("children"), list):
                     children_source = params.get("children") or []
+                elif isinstance(step.get("children"), list):
+                    children_source = step.get("children") or []
                 normalized_children = normalize(children_source) if children_source else []
                 params["children"] = normalized_children
                 step["params"] = params

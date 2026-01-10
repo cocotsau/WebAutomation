@@ -15,7 +15,10 @@ from PySide6.QtGui import QPainter, QColor, QFont, QPen, QBrush, QIcon, QAction,
 from apscheduler.schedulers.qt import QtScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+tests_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tests"))
+if tests_dir not in sys.path:
+    sys.path.append(tests_dir)
 
 from core.engine import Engine
 from core.workflow_manager import WorkflowManager, compute_logic_hierarchy, LOGIC_LOOP_TOOLS
@@ -34,6 +37,7 @@ from tools.logic_tools import (LoopAction, ForEachAction, ForEachDictAction, Whi
 from tools.util_tools import (WaitForFileAndCopyAction, ClearDirectoryAction, OCRImageAction, WeChatNotifyAction, PathExistsAction)
 from tools.excel_tools import (OpenExcelAction, ReadExcelAction, WriteExcelAction, CloseExcelAction, GetExcelRowCountAction, SaveExcelAction)
 from gui.widget_factory import WidgetFactory
+import check_workflow_structure as wfcheck
 
 try:
     from config import browser_config
@@ -497,12 +501,22 @@ class WorkflowTreeWidget(QTreeWidget):
         super().dragLeaveEvent(event)
 
     def dragMoveEvent(self, event):
-        # Restrict drag to viewport area
         if not self.viewport().rect().contains(event.pos()):
             event.ignore()
             return
 
-        # Call super to handle auto-scrolling and default logic
+        indicator_width = 20
+        number_width = 40
+        separator_offset = 10 + indicator_width + number_width
+        separator_x = separator_offset - 4
+        if event.pos().x() < separator_x:
+            self.current_drop_target = None
+            self.current_drop_indicator = QAbstractItemView.OnItem
+            self.current_drop_line_y = None
+            self.viewport().update()
+            event.ignore()
+            return
+
         if event.source() == self:
             super().dragMoveEvent(event)
         elif isinstance(event.source(), QTreeWidget):
@@ -575,16 +589,34 @@ class WorkflowTreeWidget(QTreeWidget):
             painter = QPainter(self.viewport())
             painter.setRenderHint(QPainter.Antialiasing)
             
+            indicator_width = 20
+            number_width = 40
+            separator_offset = 10 + indicator_width + number_width
+            separator_x = separator_offset - 4
+            viewport_width = self.viewport().width()
+
             # Configuration for the indicator
             line_color = QColor("#409EFF")
             line_width = 2
             
             painter.setPen(QPen(line_color, line_width))
-            # Draw Line across the entire viewport width at snapped divider
-            viewport_width = self.viewport().width()
-            painter.drawLine(0, self.current_drop_line_y, viewport_width, self.current_drop_line_y)
+            # Draw Line only on the interactive area (right side of separator)
+            painter.drawLine(separator_x, self.current_drop_line_y, viewport_width, self.current_drop_line_y)
 
     def dropEvent(self, event):
+        indicator_width = 20
+        number_width = 40
+        separator_offset = 10 + indicator_width + number_width
+        separator_x = separator_offset - 4
+        if event.pos().x() < separator_x:
+            self.current_drop_target = None
+            self.current_drop_indicator = QAbstractItemView.OnItem
+            self.current_drop_line_y = None
+            self.viewport().update()
+            self.is_dragging = False
+            event.ignore()
+            return
+
         self.current_drop_target = None
         self.viewport().update()
         self.is_dragging = False
@@ -657,27 +689,13 @@ class StepItemDelegate(QStyledItemDelegate):
         
         depth = 0
         tree = self.parent()
-        item = tree.itemFromIndex(index)
-        root = tree.invisibleRootItem()
-        current = None
-        stack_depth = 0
-
-        def is_logic_block_starter(name):
-            return name in ["For循环", "Foreach循环", "Foreach字典循环", "While循环", "If 条件"]
-
-        for i in range(root.childCount()):
-            it = root.child(i)
-            data_iter = it.data(0, Qt.UserRole) or {}
-            name_iter = data_iter.get("tool_name")
-            if it is item:
-                current = it
-                depth = stack_depth
-                break
-            if is_logic_block_starter(name_iter):
-                stack_depth += 1
-            elif name_iter == "EndMarker":
-                if stack_depth > 0:
-                    stack_depth -= 1
+        item = tree.itemFromIndex(index) if tree else None
+        root = tree.invisibleRootItem() if tree else None
+        if tree is not None and item is not None and root is not None:
+            parent = item.parent()
+            while parent is not None and parent is not root:
+                depth += 1
+                parent = parent.parent()
         indicator_width = 20  # 左侧折叠列点击区宽度
         number_width = 40
         separator_offset = 10 + indicator_width + number_width
@@ -716,10 +734,6 @@ class StepItemDelegate(QStyledItemDelegate):
 
         line_number = compute_line_for(item) if item is not None else None
 
-        if tool_name == "EndMarker" and depth > 0:
-            depth -= 1
-        elif tool_name in ("Else If 条件", "Else 否则") and depth > 0:
-            depth -= 1
         indent_offset = depth * 18
         content_rect = bg_rect.adjusted(separator_offset + 6 + indent_offset, 4, -10, -4)
         params = data.get("params", {})
@@ -1032,8 +1046,10 @@ class MainWindow(QMainWindow):
         self.btn_redo = self.create_toolbar_btn("重做", "#909399")
         self.btn_redo.setEnabled(False)
         self.btn_redo.clicked.connect(self.perform_redo)
-        self.btn_check_steps = self.create_toolbar_btn("步骤检查", "#909399")
+        self.btn_check_steps = self.create_toolbar_btn("步骤检查 GUI->JSON", "#909399")
         self.btn_check_steps.clicked.connect(self.check_workflow_structure)
+        self.btn_check_steps_reverse = self.create_toolbar_btn("步骤检查 JSON->GUI", "#909399")
+        self.btn_check_steps_reverse.clicked.connect(self.check_workflow_json_to_gui)
         self.workflow_name_label = QLabel("未命名工作流")
         self.workflow_name_label.setStyleSheet("color: #606266;")
         self.btn_edit_name = QPushButton("✎")
@@ -1062,6 +1078,7 @@ class MainWindow(QMainWindow):
         toolbar_layout.addWidget(self.btn_undo)
         toolbar_layout.addWidget(self.btn_redo)
         toolbar_layout.addWidget(self.btn_check_steps)
+        toolbar_layout.addWidget(self.btn_check_steps_reverse)
         toolbar_layout.addSpacing(10)
         toolbar_layout.addWidget(self.workflow_name_label)
         toolbar_layout.addWidget(self.btn_edit_name)
@@ -1459,17 +1476,70 @@ class MainWindow(QMainWindow):
         if not steps:
             return
         current = self.workflow_tree.currentItem()
+        root = self.workflow_tree.invisibleRootItem()
+
         parent = None
         insert_index = -1
-        root = self.workflow_tree.invisibleRootItem()
+
+        def find_logic_header_for_endmarker(item):
+            data = item.data(0, Qt.UserRole) or {}
+            params = data.get("params") or {}
+            scope = params.get("scope")
+            container = item.parent() or root
+            idx = container.indexOfChild(item)
+            logic_names = []
+            if scope == "loop":
+                logic_names = list(LOGIC_LOOP_TOOLS)
+            elif scope == "if":
+                logic_names = ["If 条件"]
+            if idx > 0 and logic_names:
+                for j in range(idx - 1, -1, -1):
+                    it = container.child(j)
+                    d = it.data(0, Qt.UserRole) or {}
+                    n = d.get("tool_name")
+                    if n in logic_names:
+                        return it
+            return None
+
+        def find_ancestor_logic(item):
+            p = item.parent()
+            while p and p is not root:
+                d = p.data(0, Qt.UserRole) or {}
+                n = d.get("tool_name")
+                if n in LOGIC_TOOLS:
+                    return p
+                p = p.parent()
+            return None
+
         if current:
-            parent = current.parent() or root
-            insert_index = parent.indexOfChild(current) + 1
+            data = current.data(0, Qt.UserRole) or {}
+            name = data.get("tool_name")
+            if name in LOGIC_TOOLS:
+                parent = current
+                insert_index = parent.childCount()
+            elif name == "EndMarker":
+                logic_head = find_logic_header_for_endmarker(current)
+                if logic_head:
+                    parent = logic_head
+                    insert_index = parent.childCount()
+                else:
+                    parent = current.parent() or root
+                    insert_index = parent.indexOfChild(current) + 1
+            else:
+                logic_head = find_ancestor_logic(current)
+                if logic_head:
+                    parent = logic_head
+                    insert_index = parent.childCount()
+                else:
+                    parent = current.parent() or root
+                    insert_index = parent.indexOfChild(current) + 1
         else:
             parent = root
             insert_index = parent.childCount()
+
         if parent is None:
             return
+
         self.create_undo_snapshot()
         for step in steps:
             tool_name = step.get("tool_name", "")
@@ -1508,103 +1578,31 @@ class MainWindow(QMainWindow):
         self.status_label.setText("已重做上一步操作。")
 
     def check_workflow_structure(self):
-        def build_tree_view(steps):
-            result = []
-            for s in steps:
-                if not isinstance(s, dict):
-                    continue
-                step = json.loads(json.dumps(s, ensure_ascii=False))
-                step.pop("line", None)
-                name = step.get("tool_name")
-                params = step.get("params") or {}
-                children_for_tree = []
-                if_tools = {"If 条件", "Else If 条件", "Else 否则"}
-                if name in LOGIC_LOOP_TOOLS and isinstance(params.get("children"), list):
-                    children_for_tree = params.get("children") or []
-                elif name in if_tools and isinstance(params.get("children"), list):
-                    children_for_tree = params.get("children") or []
-                elif isinstance(step.get("children"), list):
-                    children_for_tree = step.get("children") or []
-                step["children"] = build_tree_view(children_for_tree)
-                result.append(step)
-            return result
-
-        def strip_runtime_fields(steps):
-            for s in steps:
-                if not isinstance(s, dict):
-                    continue
-                s.pop("line", None)
-                s.pop("expanded", None)
-                params = s.get("params")
-                if isinstance(params, dict) and isinstance(params.get("children"), list):
-                    strip_runtime_fields(params["children"])
-                if isinstance(s.get("children"), list):
-                    strip_runtime_fields(s["children"])
-
-        def canonical_copy(steps):
-            clone = json.loads(json.dumps(steps, ensure_ascii=False))
-            strip_runtime_fields(clone)
-            return clone
-
-        def iter_workflows(base_dir):
-            for group in os.listdir(base_dir):
-                group_path = os.path.join(base_dir, group)
-                if not os.path.isdir(group_path):
-                    continue
-                for fname in os.listdir(group_path):
-                    if not fname.endswith(".json"):
-                        continue
-                    if fname.endswith(".elements.json"):
-                        continue
-                    yield group, fname[:-5]
-
-        def check_single_workflow(manager, group, name):
-            try:
-                raw = manager.load_for_editor(name, group)
-            except Exception as e:
-                print(f"FAIL {group}/{name}: 加载流程失败: {e}")
-                return False
-            if not isinstance(raw, dict):
-                print(f"SKIP {group}/{name}: invalid payload")
-                return True
-            steps_editor = raw.get("steps") or []
-            if not isinstance(steps_editor, list):
-                steps_editor = []
-            baseline = steps_editor
-            tree_view = build_tree_view(baseline)
-            try:
-                normalized_from_gui = compute_logic_hierarchy(tree_view, strict=True)
-            except Exception as e:
-                print(f"FAIL {group}/{name}: GUI 结构规范化失败: {e}")
-                return False
-            a = canonical_copy(baseline)
-            b = canonical_copy(normalized_from_gui)
-            if a == b:
-                print(f"OK {group}/{name}")
-                return True
-            print(f"FAIL {group}/{name}")
-            print("from_file:")
-            print(json.dumps(a, ensure_ascii=False, indent=2))
-            print("from_gui:")
-            print(json.dumps(b, ensure_ascii=False, indent=2))
-            return False
-
-        base_dir = getattr(self.workflow_manager, "base_dir", os.path.join("workflows"))
-        if not os.path.exists(base_dir):
-            QMessageBox.information(self, "步骤检查", "未找到 workflows 目录。")
+        current_name = getattr(self, "current_workflow_name", None)
+        current_group = getattr(self, "current_workflow_group", None)
+        if not current_name or not current_group:
+            QMessageBox.information(self, "步骤检查 GUI->JSON", "当前没有已加载的流程。")
             return
-        all_ok = True
-        failed = []
-        for group, name in iter_workflows(base_dir):
-            ok = check_single_workflow(self.workflow_manager, group, name)
-            if not ok:
-                all_ok = False
-                failed.append(f"{group}/{name}")
-        if all_ok:
-            QMessageBox.information(self, "步骤检查", "所有流程步骤结构与保存结构一致。")
+        ok = wfcheck.check_workflow(self.workflow_manager, current_group, current_name)
+        if ok:
+            QMessageBox.information(self, "步骤检查 GUI->JSON", "当前流程：GUI 结构 与 保存结构一致。")
         else:
-            detail = "\n".join(failed)
-            QMessageBox.warning(self, "步骤检查", f"以下流程结构不一致，详细差异已输出到控制台：\n{detail}")
+            QMessageBox.warning(self, "步骤检查 GUI->JSON", "当前流程：GUI 结构 与 保存结构不一致，详细差异已输出到控制台。")
+
+    def check_workflow_json_to_gui(self):
+        current_name = getattr(self, "current_workflow_name", None)
+        current_group = getattr(self, "current_workflow_group", None)
+        if not current_name or not current_group:
+            QMessageBox.information(self, "步骤检查 JSON->GUI", "当前没有已加载的流程。")
+            return
+
+        wfcheck.reconstruct_gui_view_from_json(self.workflow_manager, current_group, current_name)
+        gui_steps = self.get_workflow_data()
+        ok = wfcheck.compare_file_vs_gui(self.workflow_manager, current_group, current_name, gui_steps)
+        if ok:
+            QMessageBox.information(self, "步骤检查 JSON->GUI", "当前流程：磁盘 JSON 结构 与 GUI 结构一致。")
+        else:
+            QMessageBox.warning(self, "步骤检查 JSON->GUI", "当前流程：磁盘 JSON 结构 与 GUI 结构不一致，详细差异已输出到控制台。")
 
     def toggle_disable_for_selected(self, base_disabled_all=None):
         selected_items = self.workflow_tree.selectedItems()
@@ -2038,6 +2036,25 @@ class MainWindow(QMainWindow):
                 indicator = QAbstractItemView.DropIndicatorPosition(indicator)
         except Exception:
             pass
+        if target_item and indicator == QAbstractItemView.BelowItem:
+            t_data = target_item.data(0, Qt.UserRole) or {}
+            t_name = t_data.get("tool_name")
+            if t_name in LOGIC_TOOLS:
+                indicator = QAbstractItemView.OnItem
+        if target_item and indicator == QAbstractItemView.AboveItem and tool_name not in LOGIC_TOOLS and tool_name != "EndMarker":
+            t_data = target_item.data(0, Qt.UserRole) or {}
+            t_name = t_data.get("tool_name")
+            parent = target_item.parent()
+            container = parent or self.workflow_tree.invisibleRootItem()
+            if t_name in ("Else If 条件", "Else 否则"):
+                idx = container.indexOfChild(target_item)
+                if idx > 0:
+                    prev = container.child(idx - 1)
+                    p_data = prev.data(0, Qt.UserRole) or {}
+                    p_name = p_data.get("tool_name")
+                    if p_name in ("If 条件", "Else If 条件", "Else 否则"):
+                        target_item = prev
+                        indicator = QAbstractItemView.OnItem
         if tool_name == "End IF 标记":
             if not target_item:
                 self.add_step("EndMarker", existing_params={"scope": "if"})
@@ -2060,15 +2077,46 @@ class MainWindow(QMainWindow):
                 indicator = QAbstractItemView.DropIndicatorPosition(indicator)
         except Exception:
             pass
-
+        source_data = item.data(0, Qt.UserRole) or {}
+        source_name = source_data.get("tool_name")
         if target_item and indicator == QAbstractItemView.OnItem:
             t_data = target_item.data(0, Qt.UserRole)
             t_name = t_data.get("tool_name") if t_data else None
             if t_name and t_name not in LOGIC_TOOLS:
                 indicator = QAbstractItemView.BelowItem
-
-        source_data = item.data(0, Qt.UserRole) or {}
-        source_name = source_data.get("tool_name")
+        if target_item and indicator == QAbstractItemView.BelowItem and source_name not in LOGIC_TOOLS and source_name != "EndMarker":
+            t_data = target_item.data(0, Qt.UserRole) or {}
+            t_name = t_data.get("tool_name")
+            if t_name in LOGIC_TOOLS:
+                indicator = QAbstractItemView.OnItem
+        if target_item and indicator == QAbstractItemView.AboveItem and source_name not in LOGIC_TOOLS and source_name != "EndMarker":
+            t_data = target_item.data(0, Qt.UserRole) or {}
+            t_name = t_data.get("tool_name")
+            parent = target_item.parent()
+            container = parent or self.workflow_tree.invisibleRootItem()
+            if t_name in ("Else If 条件", "Else 否则"):
+                idx = container.indexOfChild(target_item)
+                if idx > 0:
+                    prev = container.child(idx - 1)
+                    p_data = prev.data(0, Qt.UserRole) or {}
+                    p_name = p_data.get("tool_name")
+                    if p_name in ("If 条件", "Else If 条件", "Else 否则"):
+                        target_item = prev
+                        indicator = QAbstractItemView.OnItem
+            if t_name == "EndMarker":
+                parent = target_item.parent()
+                logic_item = None
+                if parent:
+                    idx = parent.indexOfChild(target_item)
+                    if idx > 0:
+                        logic_item = parent.child(idx - 1)
+                else:
+                    idx = self.workflow_tree.indexOfTopLevelItem(target_item)
+                    if idx > 0:
+                        logic_item = self.workflow_tree.topLevelItem(idx - 1)
+                if logic_item:
+                    target_item = logic_item
+                    indicator = QAbstractItemView.OnItem
         if source_name in ("Else If 条件", "Else 否则") and target_item:
             t_data = target_item.data(0, Qt.UserRole) or {}
             t_name = t_data.get("tool_name")
