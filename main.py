@@ -1,5 +1,6 @@
 from core.engine import Engine
-from tools.basic_tools import PrintLogAction, DelayAction, SetVariableAction, FileDialogAction, InputDialogAction, CalculateAction
+from core.workflow_manager import compute_logic_hierarchy
+from tools.basic_tools import PrintLogAction, DelayAction, SetVariableAction, FileDialogAction, InputDialogAction, CalculateAction, ExecutePythonCodeAction
 from tools.excel_tools import OpenExcelAction, ReadExcelAction, GetExcelRowCountAction, WriteExcelAction, SaveExcelAction, CloseExcelAction
 from tools.logic_tools import WhileAction
 from tools.util_tools import ExtractContentAction
@@ -15,6 +16,8 @@ TOOL_REGISTRY = {
     "FileDialog": FileDialogAction,
     "InputDialog": InputDialogAction,
     "Calculate": CalculateAction,
+    "ExecutePythonCode": ExecutePythonCodeAction,
+    "ExecutePythonCodeAction": ExecutePythonCodeAction,
     "OpenExcel": OpenExcelAction,
     "ReadExcel": ReadExcelAction,
     "GetExcelRowCount": GetExcelRowCountAction,
@@ -110,6 +113,7 @@ def main():
     ]
 
     engine = Engine()
+    workflow_data = compute_logic_hierarchy(workflow_data, strict=True)
     engine.load_workflow(workflow_data, TOOL_REGISTRY)
     engine.run()
 

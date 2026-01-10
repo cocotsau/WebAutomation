@@ -61,3 +61,11 @@ class FileTools:
             except Exception as e:
                 print(f'删除 {file_path} 失败. 原因: {e}')
         print(f"目录清空完成: {directory}")
+
+    @staticmethod
+    def path_exists(path):
+        if not isinstance(path, str):
+            path = str(path)
+        exists = os.path.exists(path)
+        print(f"路径存在检查: {path} -> {exists}")
+        return exists

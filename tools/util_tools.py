@@ -52,6 +52,34 @@ class ClearDirectoryAction(ActionBase):
         FileTools.clear_directory(directory)
         return True
 
+
+class PathExistsAction(ActionBase):
+    @property
+    def name(self) -> str:
+        return "判断路径是否存在"
+    
+    @property
+    def description(self) -> str:
+        return "检查文件或文件夹是否存在，并将结果保存到变量。"
+    
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "path", "label": "路径(支持变量)", "type": "string"},
+            {"name": "output_variable", "label": "保存到变量", "type": "string", "default": "path_exists", "variable_type": "一般变量", "is_variable": True}
+        ]
+    
+    def execute(self, context: Dict[str, Any]) -> bool:
+        path = self.params.get("path", "")
+        output_var = self.params.get("output_variable", "path_exists")
+        try:
+            if isinstance(path, str):
+                path = path.format(**context)
+        except Exception:
+            pass
+        exists = FileTools.path_exists(path)
+        context[output_var] = exists
+        return True
+
 class OCRImageAction(ActionBase):
     @property
     def name(self) -> str:

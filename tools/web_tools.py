@@ -511,6 +511,99 @@ class InputTextAction(ActionBase):
             {"name": "timeout", "type": "int", "label": "超时时间(秒)", "default": 20, "advanced": True, "enable_if": {"locator_source": ["手动", "元素库"]}}
         ]
 
+
+class SendKeysAction(ActionBase):
+    @property
+    def name(self) -> str:
+        return "发送按键"
+
+    @property
+    def description(self) -> str:
+        return "向元素发送按键（不清空原内容），等价于 element.send_keys()."
+
+    def execute(self, context: Dict[str, Any]) -> bool:
+        locator_source = self.params.get("locator_source", "网页元素")
+        # 兼容旧数据：优先使用 keys，没有则退回 text
+        keys = self.params.get("keys")
+        if not keys:
+            keys = self.params.get("text", "")
+
+        try:
+            keys = keys.format(**context)
+        except Exception:
+            pass
+
+        element = None
+
+        if locator_source == "网页元素":
+            element_var = self.params.get("target_element_variable", "")
+            var_name = element_var
+            if isinstance(var_name, str) and isinstance(var_name, str) and var_name.startswith("{") and var_name.endswith("}"):
+                var_name = var_name[1:-1]
+            element = context.get(var_name)
+            if not element:
+                print(f"[WEB]: Web element variable '{element_var}' (resolved as '{var_name}') not found.")
+                return False
+        else:
+            driver_var = self.params.get("driver_variable", "")
+            d_var_name = driver_var
+            if isinstance(d_var_name, str) and d_var_name.startswith("{") and d_var_name.endswith("}"):
+                d_var_name = d_var_name[1:-1]
+
+            driver = context.get(d_var_name) or context.get("driver")
+            if not driver:
+                print(f"[WEB]: Driver '{driver_var}' (resolved as '{d_var_name}') not found.")
+                return False
+
+            element_key = self.params.get("element_key", "")
+            by = self.params.get("by", "xpath")
+            value = self.params.get("value")
+
+            if locator_source == "元素库" and element_key:
+                resolved = _resolve_locator_from_element_library(context, element_key)
+                if not resolved:
+                    print(f"[WEB]: Element not found in library: {element_key}")
+                    return False
+                by, value = resolved
+            else:
+                try:
+                    if isinstance(value, str):
+                        value = value.format(**context)
+                except Exception:
+                    pass
+
+            timeout = int(self.params.get("timeout", 20))
+            locator_type = _map_by(by)
+
+            try:
+                if 'Web' in globals():
+                    element = Web.wait_element_visible(driver, (locator_type, value), timeout)
+                else:
+                    element = WebDriverWait(driver, timeout).until(EC.visibility_of_element_located((locator_type, value)))
+            except Exception as e:
+                print(f"[WEB]: Failed to find element for send_keys: {e}")
+                return False
+
+        try:
+            element.send_keys(keys)
+            print(f"[WEB]: Sent keys to element")
+            return True
+        except Exception as e:
+            print(f"[WEB]: Failed to send keys: {e}")
+            return False
+
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "driver_variable", "type": "str", "label": "网页对象变量名", "default": "", "variable_type": "网页对象", "is_variable": True, "enable_if": {"locator_source": ["手动", "元素库", "网页元素"]}},
+            {"name": "locator_source", "type": "str", "label": "定位来源", "default": "网页元素", "options": ["网页元素", "手动", "元素库"]},
+            {"name": "target_element_variable", "type": "str", "label": "网页元素变量名", "default": "", "variable_type": "网页元素", "is_variable": True, "enable_if": {"locator_source": "网页元素"}},
+            {"name": "element_key", "type": "str", "label": "元素库 Key", "default": "", "enable_if": {"locator_source": "元素库"}, "ui_options": {"element_picker": True}},
+            {"name": "by", "type": "str", "label": "定位方式", "default": "xpath", "options": ["xpath", "css", "id", "name", "class_name", "tag_name", "link_text", "partial_link_text"], "enable_if": {"locator_source": "手动"}},
+            {"name": "value", "type": "str", "label": "定位值", "default": "", "enable_if": {"locator_source": "手动"}},
+            {"name": "keys", "type": "str", "label": "按键内容(支持 {变量})", "default": ""},
+            {"name": "timeout", "type": "int", "label": "超时时间(秒)", "default": 20, "advanced": True, "enable_if": {"locator_source": ["手动", "元素库"]}}
+        ]
+
 class GoToUrlAction(ActionBase):
     @property
     def name(self) -> str:

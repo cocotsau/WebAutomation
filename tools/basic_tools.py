@@ -4,6 +4,8 @@ import tkinter as tk
 from tkinter import filedialog, simpledialog
 from typing import Dict, Any, List
 from core.action_base import ActionBase
+import re
+from core.exit_flow import ExitFlowException
 
 def get_tk_root():
     """Helper to get or create a hidden Tk root."""
@@ -110,14 +112,43 @@ class CalculateAction(ActionBase):
         output_var = self.params.get("output_variable", "result")
         
         try:
-            # Safe-ish eval with context
-            # We assume context values are safe or the user is trusted (local automation)
             result = eval(expression, {}, context)
             context[output_var] = result
             print(f"[Calculate] {expression} = {result}")
             return True
         except Exception as e:
             print(f"[Calculate] Error: {e}")
+            return False
+
+
+class ExecutePythonCodeAction(ActionBase):
+    @property
+    def name(self) -> str:
+        return "执行 Python 代码段"
+    
+    @property
+    def description(self) -> str:
+        return "执行 Python 代码段，可访问和修改流程变量。"
+    
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "code", "label": "Python 代码段", "type": "text", "default": ""},
+        ]
+    
+    def execute(self, context: Dict[str, Any]) -> bool:
+        code = self.params.get("code", "")
+        if not isinstance(code, str):
+            code = str(code)
+        try:
+            pattern = re.compile(r"\{([\w]+)\}")
+            processed = pattern.sub(lambda m: m.group(1), code)
+        except Exception:
+            processed = code
+        try:
+            exec(processed, {}, context)
+            return True
+        except Exception as e:
+            print(f"[ExecutePythonCode] Error: {e}")
             return False
 
 class PrintLogAction(ActionBase):
@@ -190,6 +221,29 @@ class DelayAction(ActionBase):
         return [
             {"name": "seconds", "type": "float", "label": "Seconds to wait", "default": 1.0}
         ]
+
+
+class ExitProgramAction(ActionBase):
+    @property
+    def name(self) -> str:
+        return "退出程序"
+    
+    @property
+    def description(self) -> str:
+        return "立即结束整个流程，可设置退出码(0=正常,1=异常)。"
+    
+    def get_param_schema(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "exit_code", "type": "int", "label": "退出码(0=正常,1=异常)", "default": 0}
+        ]
+    
+    def execute(self, context: Dict[str, Any]) -> bool:
+        code = self.params.get("exit_code", 0)
+        try:
+            code = int(code)
+        except Exception:
+            code = 0
+        raise ExitFlowException(code)
 
 class SetVariableAction(ActionBase):
     @property

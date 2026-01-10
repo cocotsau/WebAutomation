@@ -38,61 +38,36 @@ class WidgetFactory:
         expected_type = field.get("variable_type")
         
         if (key in ['driver_variable', 'output_variable'] or field.get('is_variable', False)) and not is_creation:
-            widget = QComboBox()
-            widget.setEditable(True)
+            widget = QLineEdit()
+
             avail = {}
             if context_getter:
                 try:
                     avail = context_getter()
                 except:
                     pass
-            
+
             if isinstance(avail, (list, set, tuple)):
                 avail = {k: "一般变量" for k in avail}
             elif not isinstance(avail, dict):
                 avail = {}
 
-            # Apply type filtering
             if expected_type:
-                # 严格过滤：如果指定了特殊类型（网页对象、网页元素、Excel对象、循环变量、循环项），则只显示该类型
                 if expected_type in ["网页对象", "网页元素", "Excel对象", "循环变量", "循环项"]:
                     filtered_avail = {k: v for k, v in avail.items() if v == expected_type}
                 else:
                     filtered_avail = {k: v for k, v in avail.items() if v == expected_type}
-                
                 if filtered_avail:
                     avail = filtered_avail
             elif key == "driver_variable":
-                # 场景控制：如果是驱动变量，默认只显示网页对象
                 filtered_avail = {k: v for k, v in avail.items() if v == "网页对象"}
                 if filtered_avail:
                     avail = filtered_avail
             elif "Excel" in tool_name and (key == "alias" or key == "excel_variable"):
-                # 场景控制：Excel 会话
                 filtered_avail = {k: v for k, v in avail.items() if v == "Excel对象"}
                 if filtered_avail:
                     avail = filtered_avail
-            
-            # Sort variables: Preferred type first, then by type, then by name
-            def sort_key(item):
-                name, vtype = item
-                # Determine priority based on key name if expected_type is missing
-                prio = 1
-                if expected_type:
-                    prio = 0 if vtype == expected_type else 1
-                elif key == "driver_variable" and vtype == "网页对象":
-                    prio = 0
-                elif key == "output_variable" and "Excel" in tool_name and vtype == "Excel对象":
-                    prio = 0
-                return (prio, vtype, name)
-            
-            sorted_vars = sorted(avail.items(), key=sort_key)
-            
-            for name, vtype in sorted_vars:
-                widget.addItem(f"{name} ({vtype})", name)
-                widget.setItemData(widget.count()-1, f"类型: {vtype}", Qt.ToolTipRole)
-            
-            # Smart Default Selection
+
             current_text = str(val)
             if not current_text:
                 if key == 'driver_variable':
@@ -104,7 +79,7 @@ class WidgetFactory:
                     if candidates:
                         current_text = sorted(candidates)[0]
 
-            widget.setCurrentText(current_text)
+            widget.setText(current_text)
             
         # 2. 下拉选项控件
         elif 'options' in field and isinstance(field['options'], list):

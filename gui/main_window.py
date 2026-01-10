@@ -2,35 +2,36 @@ import sys
 import os
 import json
 import logging
+import uuid
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QListWidget, QTreeWidget, QTreeWidgetItem, QListWidgetItem,
                                QPushButton, QLabel, QMessageBox, QInputDialog, 
                                QMenu, QDialog, QFormLayout, QLineEdit, QComboBox, 
                                QCheckBox, QAbstractItemView, QTabWidget, QStyledItemDelegate, QStyle, QStyleOptionViewItem,
-                               QSplitter, QTextEdit, QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QScrollArea, QGridLayout)
+                               QSplitter, QTextEdit, QFrame, QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QScrollArea, QGridLayout, QStackedWidget)
 from PySide6.QtCore import Qt, QTimer, Signal, QSize, QRect, Slot, QObject, QMetaObject, Q_ARG, QEvent, QMimeData, QPoint
-from PySide6.QtGui import QPainter, QColor, QFont, QPen, QBrush, QIcon, QAction, QCursor, QDrag, QPixmap
+from PySide6.QtGui import QPainter, QColor, QFont, QPen, QBrush, QIcon, QAction, QCursor, QDrag, QPixmap, QKeySequence
 from apscheduler.schedulers.qt import QtScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from core.engine import Engine
-from core.workflow_manager import WorkflowManager
+from core.workflow_manager import WorkflowManager, compute_logic_hierarchy, LOGIC_LOOP_TOOLS
 from core.element_manager import ElementManager
-from tools.basic_tools import PrintLogAction, DelayAction, SetVariableAction
+from tools.basic_tools import PrintLogAction, DelayAction, SetVariableAction, ExitProgramAction
 from tools.web_tools import (OpenBrowserAction, CloseBrowserAction, ClickElementAction, 
-                             InputTextAction, GoToUrlAction, GetElementInfoAction,
+                             InputTextAction, GoToUrlAction, GetElementInfoAction, SendKeysAction,
                              HoverElementAction, SwitchFrameAction, ScrollToElementAction, SwitchWindowAction,
                              DrawMousePathAction, HttpDownloadAction,
                              SaveElementAction, SetCheckboxAction,
                              WaitElementAction, WaitAllElementsAction,
                              GetFirstVisibleAction, FindChildAction, FindChildrenAction)
-from tools.logic_tools import (LoopAction, ForEachAction, WhileAction, 
+from tools.logic_tools import (LoopAction, ForEachAction, ForEachDictAction, WhileAction, 
                                IfAction, ElseIfAction, ElseAction, 
                                BreakAction, ContinueAction)
-from tools.util_tools import (WaitForFileAndCopyAction, ClearDirectoryAction, OCRImageAction, WeChatNotifyAction)
+from tools.util_tools import (WaitForFileAndCopyAction, ClearDirectoryAction, OCRImageAction, WeChatNotifyAction, PathExistsAction)
 from tools.excel_tools import (OpenExcelAction, ReadExcelAction, WriteExcelAction, CloseExcelAction, GetExcelRowCountAction, SaveExcelAction)
 from gui.widget_factory import WidgetFactory
 
@@ -45,13 +46,16 @@ TOOL_CATEGORIES = {
         "打印日志": PrintLogAction,
         "等待": DelayAction,
         "设置变量": SetVariableAction,
-        "计算表达式": None # Placeholder if not imported yet
+        "计算表达式": None,
+        "执行 Python 代码段": None,
+        "退出程序": ExitProgramAction
     },
     "Web 自动化": {
         "打开浏览器": OpenBrowserAction,
         "跳转链接": GoToUrlAction,
         "点击元素": ClickElementAction,
         "输入文本": InputTextAction,
+        "发送按键": SendKeysAction,
         "获取元素信息": GetElementInfoAction,
         "设置复选框": SetCheckboxAction,
         "保存元素": SaveElementAction,
@@ -79,24 +83,29 @@ TOOL_CATEGORIES = {
     "逻辑控制": {
         "For循环": LoopAction,
         "Foreach循环": ForEachAction,
+        "Foreach字典循环": ForEachDictAction,
         "While循环": WhileAction,
         "If 条件": IfAction,
         "Else If 条件": ElseIfAction,
         "Else 否则": ElseAction,
         "退出循环 (Break)": BreakAction,
-        "继续循环 (Continue)": ContinueAction
+        "继续循环 (Continue)": ContinueAction,
+        "End IF 标记": None,
+        "循环结束标记": None
     },
     "数据与工具": {
         "等待并复制文件": WaitForFileAndCopyAction,
         "清空文件夹": ClearDirectoryAction,
         "OCR 文字识别": OCRImageAction,
-        "企业微信通知": WeChatNotifyAction
+        "企业微信通知": WeChatNotifyAction,
+        "判断路径是否存在": PathExistsAction
     }
 }
 
 # Import extra tools dynamically if needed or ensure they are imported above
-from tools.basic_tools import CalculateAction, FileDialogAction, InputDialogAction, CommentAction
+from tools.basic_tools import CalculateAction, FileDialogAction, InputDialogAction, CommentAction, ExecutePythonCodeAction
 TOOL_CATEGORIES["基础工具"]["计算表达式"] = CalculateAction
+TOOL_CATEGORIES["基础工具"]["执行 Python 代码段"] = ExecutePythonCodeAction
 TOOL_CATEGORIES["基础工具"]["文件选择"] = FileDialogAction
 TOOL_CATEGORIES["基础工具"]["输入对话框"] = InputDialogAction
 TOOL_CATEGORIES["基础工具"]["备注"] = CommentAction
@@ -106,12 +115,29 @@ TOOL_CATEGORIES["数据与工具"]["提取内容"] = ExtractContentAction
 
 # Flattened Registry for Engine
 ENGINE_REGISTRY = {}
-for cat, tools in TOOL_CATEGORIES.items():
-    for name, cls in tools.items():
-        if cls:
-            ENGINE_REGISTRY[name] = cls
+TOOL_NAME_TO_ID = {}
+TOOL_ID_TO_NAME = {}
 
-LOGIC_TOOLS = ["For循环", "Foreach循环", "While循环", "If 条件", "Else If 条件", "Else 否则"]
+
+def _compute_tool_id(cls):
+    tid = getattr(cls, "tool_id", None)
+    if isinstance(tid, str) and tid.strip():
+        return tid.strip()
+    return cls.__name__
+
+
+for cat, tools in TOOL_CATEGORIES.items():
+    for display_name, cls in tools.items():
+        if not cls:
+            continue
+        tool_id = _compute_tool_id(cls)
+        TOOL_NAME_TO_ID[display_name] = tool_id
+        if tool_id not in TOOL_ID_TO_NAME:
+            TOOL_ID_TO_NAME[tool_id] = display_name
+        ENGINE_REGISTRY[tool_id] = cls
+        ENGINE_REGISTRY[display_name] = cls
+
+LOGIC_TOOLS = ["For循环", "Foreach循环", "Foreach字典循环", "While循环", "If 条件", "Else If 条件", "Else 否则"]
 
 class ParameterDialog(QDialog):
     def __init__(self, tool_name, schema, current_params=None, parent=None, scope_anchor=None, extra_context=None):
@@ -309,53 +335,44 @@ class ParameterDialog(QDialog):
             val_widget, _, container = self.inputs["value"]
 
             def update_value_widget():
+                nonlocal val_widget
                 t = vt_widget.currentText() if isinstance(vt_widget, QComboBox) else ""
+
+                text_value = ""
                 if isinstance(val_widget, QCheckBox):
-                    val_widget.setVisible(False)
-                if isinstance(val_widget, (QLineEdit, QTextEdit)):
-                    val_widget.setVisible(True)
+                    text_value = "true" if val_widget.isChecked() else "false"
+                elif isinstance(val_widget, QLineEdit):
+                    text_value = val_widget.text()
+                elif isinstance(val_widget, QTextEdit):
+                    text_value = val_widget.toPlainText()
+
                 if t == "bool":
                     if not isinstance(val_widget, QCheckBox):
                         cb = QCheckBox()
-                        current_text = ""
-                        if isinstance(val_widget, QLineEdit):
-                            current_text = val_widget.text()
-                        elif isinstance(val_widget, QTextEdit):
-                            current_text = val_widget.toPlainText()
-                        if str(current_text).strip().lower() in ("1", "true", "yes", "y", "on"):
+                        if str(text_value).strip().lower() in ("1", "true", "yes", "y", "on"):
                             cb.setChecked(True)
                         container.layout().replaceWidget(val_widget, cb)
                         val_widget.hide()
+                        val_widget = cb
                         self.inputs["value"] = (cb, 'bool', container)
-                        nonlocal_val_widget = cb
-                        def _set_val_widget():
-                            nonlocal val_widget
-                            val_widget = nonlocal_val_widget
-                        _set_val_widget()
+                    val_widget.setVisible(True)
+                elif t in ("list", "dict", "any"):
+                    if not isinstance(val_widget, QTextEdit):
+                        te = QTextEdit(text_value)
+                        te.setFixedHeight(60)
+                        container.layout().replaceWidget(val_widget, te)
+                        val_widget.hide()
+                        val_widget = te
+                        self.inputs["value"] = (te, 'text', container)
                     val_widget.setVisible(True)
                 else:
-                    text_value = ""
-                    if isinstance(val_widget, QCheckBox):
-                        text_value = "true" if val_widget.isChecked() else "false"
-                    elif isinstance(val_widget, QLineEdit):
-                        text_value = val_widget.text()
-                    elif isinstance(val_widget, QTextEdit):
-                        text_value = val_widget.toPlainText()
-                    if t in ("list", "dict", "any"):
-                        if not isinstance(val_widget, QTextEdit):
-                            te = QTextEdit(text_value)
-                            te.setFixedHeight(60)
-                            container.layout().replaceWidget(val_widget, te)
-                            val_widget.hide()
-                            self.inputs["value"] = (te, 'text', container)
-                            val_widget = te
-                    else:
-                        if not isinstance(val_widget, QLineEdit):
-                            le = QLineEdit(text_value)
-                            container.layout().replaceWidget(val_widget, le)
-                            val_widget.hide()
-                            self.inputs["value"] = (le, 'str', container)
-                            val_widget = le
+                    if not isinstance(val_widget, QLineEdit):
+                        le = QLineEdit(text_value)
+                        container.layout().replaceWidget(val_widget, le)
+                        val_widget.hide()
+                        val_widget = le
+                        self.inputs["value"] = (le, 'str', container)
+                    val_widget.setVisible(True)
 
             if isinstance(vt_widget, QComboBox):
                 vt_widget.currentTextChanged.connect(lambda _: update_value_widget())
@@ -417,8 +434,9 @@ class WorkflowTreeWidget(QTreeWidget):
         self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setDefaultDropAction(Qt.MoveAction)
         self.setAcceptDrops(True)
-        self.setDropIndicatorShown(False) # Disable default indicator to draw custom one
+        self.setDropIndicatorShown(False)
         self.setIndentation(20)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         
         # Track drop target for custom painting
         self.current_drop_target = None
@@ -573,12 +591,6 @@ class WorkflowTreeWidget(QTreeWidget):
 
         if event.source() == self:
             item = self.currentItem()
-            # Check EndMarker
-            data = item.data(0, Qt.UserRole)
-            if data and data.get("tool_name") == "EndMarker":
-                event.ignore()
-                return
-
             target = self.current_drop_target or self.itemAt(event.pos())
             indicator = self.current_drop_indicator or QAbstractItemView.BelowItem
             indicator_int = self._indicator_to_int(indicator)
@@ -649,6 +661,10 @@ class StepItemDelegate(QStyledItemDelegate):
         root = tree.invisibleRootItem()
         current = None
         stack_depth = 0
+
+        def is_logic_block_starter(name):
+            return name in ["For循环", "Foreach循环", "Foreach字典循环", "While循环", "If 条件"]
+
         for i in range(root.childCount()):
             it = root.child(i)
             data_iter = it.data(0, Qt.UserRole) or {}
@@ -657,7 +673,7 @@ class StepItemDelegate(QStyledItemDelegate):
                 current = it
                 depth = stack_depth
                 break
-            if name_iter in LOGIC_TOOLS:
+            if is_logic_block_starter(name_iter):
                 stack_depth += 1
             elif name_iter == "EndMarker":
                 if stack_depth > 0:
@@ -702,12 +718,31 @@ class StepItemDelegate(QStyledItemDelegate):
 
         if tool_name == "EndMarker" and depth > 0:
             depth -= 1
+        elif tool_name in ("Else If 条件", "Else 否则") and depth > 0:
+            depth -= 1
         indent_offset = depth * 18
         content_rect = bg_rect.adjusted(separator_offset + 6 + indent_offset, 4, -10, -4)
         params = data.get("params", {})
+        display_name = tool_name
+        if tool_name == "EndMarker":
+            scope = params.get("scope")
+            if scope == "if":
+                display_name = "End IF"
+            elif scope in (None, "loop"):
+                display_name = "循环体结束"
+            else:
+                display_name = "EndMarker"
         is_disabled = bool(data.get("disabled", False))
         if is_disabled:
             painter.setOpacity(0.45)
+
+        tree_for_log = tree
+        if tree_for_log is not None and bool(getattr(tree_for_log, "debug_icon_logging", False)):
+            try:
+                icon_x = content_rect.left()
+                print(f"[GUI-Icon] text={display_name}, tool={tool_name}, depth={depth}, indent_offset={indent_offset}, icon_x={icon_x}")
+            except Exception:
+                pass
 
         if line_number is not None:
             number_rect = QRect(4, bg_rect.top(), number_width - 8, bg_rect.height())
@@ -717,7 +752,8 @@ class StepItemDelegate(QStyledItemDelegate):
             painter.setFont(font)
             painter.drawText(number_rect, Qt.AlignVCenter | Qt.AlignRight, str(line_number))
 
-        has_children = bool(item and item.childCount() > 0)
+        logic_headers = ("If 条件", "Else If 条件", "Else 否则")
+        has_children = bool(item and (item.childCount() > 0 or tool_name in logic_headers))
         if has_children:
             indicator_height = 14
             inner_width = 16
@@ -785,7 +821,7 @@ class StepItemDelegate(QStyledItemDelegate):
         font.setBold(True)
         font.setPointSize(10)
         painter.setFont(font)
-        painter.drawText(icon_rect, Qt.AlignCenter, tool_name[0] if tool_name else "?")
+        painter.drawText(icon_rect, Qt.AlignCenter, display_name[0] if display_name else "?")
         
         param_str = ""
         if isinstance(params, dict):
@@ -810,7 +846,7 @@ class StepItemDelegate(QStyledItemDelegate):
             font.setBold(True)
             painter.setFont(font)
             painter.setPen(QColor("#303133"))
-            painter.drawText(title_rect, Qt.AlignVCenter | Qt.AlignLeft, tool_name)
+            painter.drawText(title_rect, Qt.AlignVCenter | Qt.AlignLeft, display_name)
             subtitle_rect = QRect(icon_rect.right() + 12, title_rect.bottom() + 4, content_rect.width() - 50, 16)
             font.setBold(False)
             font.setPointSize(8)
@@ -829,7 +865,11 @@ class StepItemDelegate(QStyledItemDelegate):
             item = tree.itemFromIndex(index)
             if not item:
                 return False
-            if item.childCount() > 0:
+            data = item.data(0, Qt.UserRole) or {}
+            name = data.get("tool_name")
+            logic_headers = ("If 条件", "Else If 条件", "Else 否则")
+            can_toggle = item.childCount() > 0 or name in logic_headers
+            if can_toggle:
                 indicator_width = 20
                 number_width = 40
                 rect = option.rect
@@ -872,6 +912,9 @@ class MainWindow(QMainWindow):
         # Managers
         self.workflow_manager = WorkflowManager()
         self.engine = Engine()
+        self.undo_stack = []
+        self.redo_stack = []
+        self.current_workflow_id = None
         
         # Element Managers
         self.global_element_manager = ElementManager("elements.json")
@@ -986,13 +1029,43 @@ class MainWindow(QMainWindow):
         self.btn_undo = self.create_toolbar_btn("撤销", "#909399")
         self.btn_undo.setEnabled(False)
         self.btn_undo.clicked.connect(self.perform_undo)
-        
+        self.btn_redo = self.create_toolbar_btn("重做", "#909399")
+        self.btn_redo.setEnabled(False)
+        self.btn_redo.clicked.connect(self.perform_redo)
+        self.btn_check_steps = self.create_toolbar_btn("步骤检查", "#909399")
+        self.btn_check_steps.clicked.connect(self.check_workflow_structure)
+        self.workflow_name_label = QLabel("未命名工作流")
+        self.workflow_name_label.setStyleSheet("color: #606266;")
+        self.btn_edit_name = QPushButton("✎")
+        self.btn_edit_name.setFixedSize(22, 22)
+        self.btn_edit_name.setStyleSheet("""
+            QPushButton {
+                border: none;
+                background: transparent;
+                color: #909399;
+            }
+            QPushButton:hover {
+                color: #409EFF;
+            }
+        """)
+        self.btn_edit_name.clicked.connect(self.edit_workflow_name)
+        self.workflow_name_edit = QLineEdit()
+        self.workflow_name_edit.setFixedWidth(200)
+        self.workflow_name_edit.setVisible(False)
+        self.workflow_name_edit.setStyleSheet("QLineEdit { border: 1px solid #DCDFE6; border-radius: 4px; padding: 4px 8px; }")
+        self.workflow_name_edit.editingFinished.connect(self.finish_edit_workflow_name)
         toolbar_layout.addWidget(self.btn_back)
         toolbar_layout.addWidget(self.btn_save)
         toolbar_layout.addWidget(self.btn_run)
         toolbar_layout.addWidget(self.btn_schedule)
         toolbar_layout.addWidget(self.btn_clear)
         toolbar_layout.addWidget(self.btn_undo)
+        toolbar_layout.addWidget(self.btn_redo)
+        toolbar_layout.addWidget(self.btn_check_steps)
+        toolbar_layout.addSpacing(10)
+        toolbar_layout.addWidget(self.workflow_name_label)
+        toolbar_layout.addWidget(self.btn_edit_name)
+        toolbar_layout.addWidget(self.workflow_name_edit)
         toolbar_layout.addStretch()
         
         workflow_layout.addWidget(toolbar)
@@ -1000,7 +1073,6 @@ class MainWindow(QMainWindow):
         # Workflow Tree
         self.workflow_tree = WorkflowTreeWidget()
         self.workflow_tree.setHeaderLabel("流程步骤")
-        self.workflow_tree.setSelectionMode(QAbstractItemView.SingleSelection)
         self.workflow_tree.setContextMenuPolicy(Qt.CustomContextMenu)
         try:
             if hasattr(self, "show_context_menu"):
@@ -1026,8 +1098,50 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.workflow_tree.itemDoubleClicked.connect(self.edit_step_on_double_click)
-        
         workflow_layout.addWidget(self.workflow_tree)
+
+        add_bar = QWidget()
+        add_bar.setFixedHeight(34)
+        add_bar.setStyleSheet("background-color: #F5F7FA; border-top: 1px solid #E4E7ED;")
+        add_layout = QHBoxLayout(add_bar)
+        add_layout.setContentsMargins(30, 4, 10, 4)
+        self.btn_quick_add_step = QPushButton("+ 点击添加指令(Ctrl+Shift+P)，或从左侧指令区拖入")
+        self.btn_quick_add_step.setFlat(True)
+        self.btn_quick_add_step.setStyleSheet("""
+            QPushButton {
+                border: none;
+                text-align: left;
+                color: #C0C4CC;
+            }
+            QPushButton:hover {
+                color: #909399;
+            }
+        """)
+        self.quick_add_edit = QLineEdit()
+        self.quick_add_edit.setPlaceholderText("输入或选择推荐的指令")
+        self.quick_add_edit.setVisible(False)
+        self.quick_add_edit.returnPressed.connect(lambda: self.apply_quick_add_from_inline())
+        self.quick_add_stack = QStackedWidget(add_bar)
+        self.quick_add_stack.addWidget(self.btn_quick_add_step)
+        self.quick_add_stack.addWidget(self.quick_add_edit)
+        self.btn_quick_add_step.clicked.connect(self.start_quick_add_mode)
+        add_layout.addWidget(self.quick_add_stack)
+        workflow_layout.addWidget(add_bar)
+        expand_collapse_bar = QWidget()
+        expand_collapse_bar.setFixedHeight(34)
+        expand_collapse_bar.setStyleSheet("background-color: #F5F7FA; border-top: 1px solid #E4E7ED;")
+        ec_layout = QHBoxLayout(expand_collapse_bar)
+        ec_layout.setContentsMargins(10, 4, 10, 4)
+        btn_expand_all = QPushButton("全部展开")
+        btn_expand_all.setFixedHeight(24)
+        btn_expand_all.clicked.connect(self.expand_all_logic_blocks)
+        btn_collapse_all = QPushButton("全部折叠")
+        btn_collapse_all.setFixedHeight(24)
+        btn_collapse_all.clicked.connect(self.collapse_all_logic_blocks)
+        ec_layout.addWidget(btn_expand_all)
+        ec_layout.addWidget(btn_collapse_all)
+        ec_layout.addStretch()
+        workflow_layout.addWidget(expand_collapse_bar)
         right_splitter.addWidget(self.workflow_container)
         
         # Bottom Right: Logs
@@ -1057,6 +1171,61 @@ class MainWindow(QMainWindow):
         right_splitter.addWidget(self.log_panel)
         
         main_splitter.addWidget(right_splitter)
+
+        # Shortcuts (only active when workflow tree has focus)
+        self.action_copy = QAction(self.workflow_tree)
+        self.action_copy.setShortcut(QKeySequence("Ctrl+C"))
+        self.action_copy.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.action_copy.triggered.connect(self.copy_selected_steps)
+        self.workflow_tree.addAction(self.action_copy)
+
+        self.action_cut = QAction(self.workflow_tree)
+        self.action_cut.setShortcut(QKeySequence("Ctrl+X"))
+        self.action_cut.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.action_cut.triggered.connect(self.cut_selected_steps)
+        self.workflow_tree.addAction(self.action_cut)
+
+        self.action_paste = QAction(self.workflow_tree)
+        self.action_paste.setShortcut(QKeySequence("Ctrl+V"))
+        self.action_paste.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.action_paste.triggered.connect(self.paste_steps)
+        self.workflow_tree.addAction(self.action_paste)
+
+        self.action_undo = QAction(self.workflow_tree)
+        self.action_undo.setShortcut(QKeySequence("Ctrl+Z"))
+        self.action_undo.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.action_undo.triggered.connect(self.perform_undo)
+        self.workflow_tree.addAction(self.action_undo)
+
+        self.action_redo = QAction(self.workflow_tree)
+        self.action_redo.setShortcut(QKeySequence("Ctrl+Y"))
+        self.action_redo.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.action_redo.triggered.connect(self.perform_redo)
+        self.workflow_tree.addAction(self.action_redo)
+
+        self.action_select_all = QAction(self.workflow_tree)
+        self.action_select_all.setShortcut(QKeySequence("Ctrl+A"))
+        self.action_select_all.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.action_select_all.triggered.connect(self.select_all_steps)
+        self.workflow_tree.addAction(self.action_select_all)
+
+        self.action_save = QAction(self)
+        self.action_save.setShortcut(QKeySequence("Ctrl+S"))
+        self.action_save.setShortcutContext(Qt.WindowShortcut)
+        self.action_save.triggered.connect(self.save_workflow_dialog)
+        self.addAction(self.action_save)
+
+        self.action_toggle_disable = QAction(self.workflow_tree)
+        self.action_toggle_disable.setShortcut(QKeySequence("Ctrl+/"))
+        self.action_toggle_disable.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.action_toggle_disable.triggered.connect(self.toggle_disable_shortcut)
+        self.workflow_tree.addAction(self.action_toggle_disable)
+        
+        self.action_quick_add = QAction(self.workflow_tree)
+        self.action_quick_add.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self.action_quick_add.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        self.action_quick_add.triggered.connect(self.start_quick_add_mode)
+        self.workflow_tree.addAction(self.action_quick_add)
         
         # Factors
         main_splitter.setStretchFactor(0, 1) # Left
@@ -1095,7 +1264,7 @@ class MainWindow(QMainWindow):
             d = it.data(0, Qt.UserRole) or {}
             return d.get("tool_name") == "EndMarker"
         def is_loop_tool_name(n):
-            return n in ("For循环", "Foreach循环", "While循环")
+            return n in ("For循环", "Foreach循环", "Foreach字典循环", "While循环")
         def add_vars_from_item(it, into):
             d = it.data(0, Qt.UserRole) or {}
             tname = d.get("tool_name")
@@ -1233,20 +1402,258 @@ class MainWindow(QMainWindow):
         self.log_table.scrollToBottom()
 
     def create_undo_snapshot(self):
-        self.undo_snapshot = self.get_workflow_data()
-        self.btn_undo.setEnabled(True)
+        data = self.get_workflow_data()
+        self.undo_stack.append(data)
+        self.redo_stack.clear()
+        self.btn_undo.setEnabled(len(self.undo_stack) > 0)
+        self.btn_redo.setEnabled(False)
 
     def perform_undo(self):
-        snapshot = getattr(self, "undo_snapshot", None)
-        if not snapshot:
+        if not self.undo_stack:
             QMessageBox.information(self, "提示", "没有可撤销的内容。")
             return
-        
+        snapshot = self.undo_stack.pop()
+        current = self.get_workflow_data()
+        self.redo_stack.append(current)
         self.workflow_tree.clear()
         self.load_workflow_to_tree(snapshot)
-        self.undo_snapshot = None
-        self.btn_undo.setEnabled(False)
+        self.btn_undo.setEnabled(len(self.undo_stack) > 0)
+        self.btn_redo.setEnabled(len(self.redo_stack) > 0)
         self.status_label.setText("已撤销上一步操作。")
+
+    def copy_selected_steps(self):
+        items = self.workflow_tree.selectedItems()
+        if not items:
+            return
+        root = self.workflow_tree.invisibleRootItem()
+        data_list = []
+        for it in items:
+            parent = it.parent() or root
+            data = self.get_items_data(parent)
+            idx = parent.indexOfChild(it)
+            if 0 <= idx < len(data):
+                data_list.append(data[idx])
+        self._clipboard_steps = data_list
+
+    def cut_selected_steps(self):
+        items = self.workflow_tree.selectedItems()
+        if not items:
+            return
+        self.copy_selected_steps()
+        self.create_undo_snapshot()
+        for it in items:
+            d = it.data(0, Qt.UserRole) or {}
+            parent = it.parent()
+            if parent:
+                parent.removeChild(it)
+            else:
+                idx = self.workflow_tree.indexOfTopLevelItem(it)
+                if idx != -1:
+                    self.workflow_tree.takeTopLevelItem(idx)
+        self.workflow_tree.viewport().update()
+
+    def paste_steps(self):
+        if not hasattr(self, "_clipboard_steps"):
+            return
+        steps = self._clipboard_steps
+        if not steps:
+            return
+        current = self.workflow_tree.currentItem()
+        parent = None
+        insert_index = -1
+        root = self.workflow_tree.invisibleRootItem()
+        if current:
+            parent = current.parent() or root
+            insert_index = parent.indexOfChild(current) + 1
+        else:
+            parent = root
+            insert_index = parent.childCount()
+        if parent is None:
+            return
+        self.create_undo_snapshot()
+        for step in steps:
+            tool_name = step.get("tool_name", "")
+            tool_id = step.get("tool_id") or TOOL_NAME_TO_ID.get(tool_name, tool_name)
+            item = QTreeWidgetItem([tool_name])
+            item.setData(0, Qt.UserRole, {
+                "tool_id": tool_id,
+                "tool_name": tool_name,
+                "params": step.get("params", {}),
+                "disabled": bool(step.get("disabled", False))
+            })
+            if tool_name in LOGIC_TOOLS:
+                item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
+            self.load_workflow_to_tree(step.get("children", []), item)
+            parent.insertChild(insert_index, item)
+            insert_index += 1
+        self.workflow_tree.viewport().update()
+
+    def select_all_steps(self):
+        self.workflow_tree.selectAll()
+
+    def toggle_disable_shortcut(self):
+        self.toggle_disable_for_selected()
+
+    def perform_redo(self):
+        if not self.redo_stack:
+            QMessageBox.information(self, "提示", "没有可重做的内容。")
+            return
+        snapshot = self.redo_stack.pop()
+        current = self.get_workflow_data()
+        self.undo_stack.append(current)
+        self.workflow_tree.clear()
+        self.load_workflow_to_tree(snapshot)
+        self.btn_undo.setEnabled(len(self.undo_stack) > 0)
+        self.btn_redo.setEnabled(len(self.redo_stack) > 0)
+        self.status_label.setText("已重做上一步操作。")
+
+    def check_workflow_structure(self):
+        def build_tree_view(steps):
+            result = []
+            for s in steps:
+                if not isinstance(s, dict):
+                    continue
+                step = json.loads(json.dumps(s, ensure_ascii=False))
+                step.pop("line", None)
+                name = step.get("tool_name")
+                params = step.get("params") or {}
+                children_for_tree = []
+                if_tools = {"If 条件", "Else If 条件", "Else 否则"}
+                if name in LOGIC_LOOP_TOOLS and isinstance(params.get("children"), list):
+                    children_for_tree = params.get("children") or []
+                elif name in if_tools and isinstance(params.get("children"), list):
+                    children_for_tree = params.get("children") or []
+                elif isinstance(step.get("children"), list):
+                    children_for_tree = step.get("children") or []
+                step["children"] = build_tree_view(children_for_tree)
+                result.append(step)
+            return result
+
+        def strip_runtime_fields(steps):
+            for s in steps:
+                if not isinstance(s, dict):
+                    continue
+                s.pop("line", None)
+                s.pop("expanded", None)
+                params = s.get("params")
+                if isinstance(params, dict) and isinstance(params.get("children"), list):
+                    strip_runtime_fields(params["children"])
+                if isinstance(s.get("children"), list):
+                    strip_runtime_fields(s["children"])
+
+        def canonical_copy(steps):
+            clone = json.loads(json.dumps(steps, ensure_ascii=False))
+            strip_runtime_fields(clone)
+            return clone
+
+        def iter_workflows(base_dir):
+            for group in os.listdir(base_dir):
+                group_path = os.path.join(base_dir, group)
+                if not os.path.isdir(group_path):
+                    continue
+                for fname in os.listdir(group_path):
+                    if not fname.endswith(".json"):
+                        continue
+                    if fname.endswith(".elements.json"):
+                        continue
+                    yield group, fname[:-5]
+
+        def check_single_workflow(manager, group, name):
+            try:
+                raw = manager.load_for_editor(name, group)
+            except Exception as e:
+                print(f"FAIL {group}/{name}: 加载流程失败: {e}")
+                return False
+            if not isinstance(raw, dict):
+                print(f"SKIP {group}/{name}: invalid payload")
+                return True
+            steps_editor = raw.get("steps") or []
+            if not isinstance(steps_editor, list):
+                steps_editor = []
+            baseline = steps_editor
+            tree_view = build_tree_view(baseline)
+            try:
+                normalized_from_gui = compute_logic_hierarchy(tree_view, strict=True)
+            except Exception as e:
+                print(f"FAIL {group}/{name}: GUI 结构规范化失败: {e}")
+                return False
+            a = canonical_copy(baseline)
+            b = canonical_copy(normalized_from_gui)
+            if a == b:
+                print(f"OK {group}/{name}")
+                return True
+            print(f"FAIL {group}/{name}")
+            print("from_file:")
+            print(json.dumps(a, ensure_ascii=False, indent=2))
+            print("from_gui:")
+            print(json.dumps(b, ensure_ascii=False, indent=2))
+            return False
+
+        base_dir = getattr(self.workflow_manager, "base_dir", os.path.join("workflows"))
+        if not os.path.exists(base_dir):
+            QMessageBox.information(self, "步骤检查", "未找到 workflows 目录。")
+            return
+        all_ok = True
+        failed = []
+        for group, name in iter_workflows(base_dir):
+            ok = check_single_workflow(self.workflow_manager, group, name)
+            if not ok:
+                all_ok = False
+                failed.append(f"{group}/{name}")
+        if all_ok:
+            QMessageBox.information(self, "步骤检查", "所有流程步骤结构与保存结构一致。")
+        else:
+            detail = "\n".join(failed)
+            QMessageBox.warning(self, "步骤检查", f"以下流程结构不一致，详细差异已输出到控制台：\n{detail}")
+
+    def toggle_disable_for_selected(self, base_disabled_all=None):
+        selected_items = self.workflow_tree.selectedItems()
+        if not selected_items:
+            return
+        if base_disabled_all is None:
+            base_disabled_all = True
+            for it in selected_items:
+                if not d_it.get("disabled", False):
+                    base_disabled_all = False
+                    break
+        new_value = not base_disabled_all
+        self.create_undo_snapshot()
+
+        def apply_disable_recursive(it, value):
+            d = it.data(0, Qt.UserRole) or {}
+            d["disabled"] = value
+            it.setData(0, Qt.UserRole, d)
+            for i in range(it.childCount()):
+                child = it.child(i)
+                apply_disable_recursive(child, value)
+
+        def apply_disable_with_logic_range(it, value):
+            apply_disable_recursive(it, value)
+            d = it.data(0, Qt.UserRole) or {}
+            name = d.get("tool_name")
+            if name not in LOGIC_TOOLS:
+                return
+            parent = it.parent() or self.workflow_tree.invisibleRootItem()
+            start_index = parent.indexOfChild(it)
+            if start_index < 0:
+                return
+            stack = [it]
+            for idx in range(start_index + 1, parent.childCount()):
+                sib = parent.child(idx)
+                sd = sib.data(0, Qt.UserRole) or {}
+                sname = sd.get("tool_name")
+                apply_disable_recursive(sib, value)
+                if sname in LOGIC_TOOLS:
+                    stack.append(sib)
+                elif sname == "EndMarker":
+                    if stack:
+                        stack.pop()
+                    if not stack:
+                        break
+
+        for it in selected_items:
+            apply_disable_with_logic_range(it, new_value)
+        self.workflow_tree.viewport().update()
 
     def confirm_clear_workflow(self):
         if self.workflow_tree.topLevelItemCount() == 0:
@@ -1259,6 +1666,65 @@ class MainWindow(QMainWindow):
         self.create_undo_snapshot()
         self.workflow_tree.clear()
         self.status_label.setText("已清空，可撤销。")
+
+    def edit_workflow_name(self):
+        if hasattr(self, "workflow_name_label") and hasattr(self, "workflow_name_edit"):
+            self.workflow_name_edit.setText(self.workflow_name_label.text())
+            self.workflow_name_label.setVisible(False)
+            self.btn_edit_name.setVisible(False)
+            self.workflow_name_edit.setVisible(True)
+            self.workflow_name_edit.setFocus()
+            self.workflow_name_edit.selectAll()
+
+    def finish_edit_workflow_name(self):
+        if hasattr(self, "workflow_name_label") and hasattr(self, "workflow_name_edit"):
+            text = self.workflow_name_edit.text().strip() or "未命名工作流"
+            self.workflow_name_label.setText(text)
+            self.workflow_name_edit.setVisible(False)
+            self.workflow_name_label.setVisible(True)
+            self.btn_edit_name.setVisible(True)
+
+    def expand_all_logic_blocks(self):
+        root = self.workflow_tree.invisibleRootItem()
+        def walk(parent):
+            for i in range(parent.childCount()):
+                it = parent.child(i)
+                yield it
+                for sub in walk(it):
+                    yield sub
+        for it in walk(root):
+            data = it.data(0, Qt.UserRole) or {}
+            name = data.get("tool_name")
+            if name in LOGIC_TOOLS:
+                it.setExpanded(True)
+        for i in range(self.workflow_tree.topLevelItemCount()):
+            item = self.workflow_tree.topLevelItem(i)
+            data = item.data(0, Qt.UserRole) or {}
+            name = data.get("tool_name")
+            if name in LOGIC_TOOLS:
+                item.setExpanded(True)
+        self.refresh_logic_visibility()
+
+    def collapse_all_logic_blocks(self):
+        root = self.workflow_tree.invisibleRootItem()
+        def walk(parent):
+            for i in range(parent.childCount()):
+                it = parent.child(i)
+                yield it
+                for sub in walk(it):
+                    yield sub
+        for it in walk(root):
+            data = it.data(0, Qt.UserRole) or {}
+            name = data.get("tool_name")
+            if name in LOGIC_TOOLS:
+                it.setExpanded(False)
+        for i in range(self.workflow_tree.topLevelItemCount()):
+            item = self.workflow_tree.topLevelItem(i)
+            data = item.data(0, Qt.UserRole) or {}
+            name = data.get("tool_name")
+            if name in LOGIC_TOOLS:
+                item.setExpanded(False)
+        self.refresh_logic_visibility()
 
     def init_saved_workflows_tab(self):
         self.saved_tab = QWidget()
@@ -1293,8 +1759,23 @@ class MainWindow(QMainWindow):
             group_item.setFont(0, QFont("Arial", 10, QFont.Bold))
             
             for wf_name in items:
-                wf_item = QTreeWidgetItem([wf_name])
-                wf_item.setData(0, Qt.UserRole, {"type": "workflow", "name": wf_name, "group": group})
+                raw_data = self.workflow_manager.load_workflow(wf_name, group)
+                if not isinstance(raw_data, dict):
+                    continue
+                display_name = wf_name
+                workflow_id = None
+                name_value = raw_data.get("name")
+                if isinstance(name_value, str) and name_value.strip():
+                    display_name = name_value.strip()
+                workflow_id = raw_data.get("id")
+                wf_item = QTreeWidgetItem([display_name])
+                wf_item.setData(0, Qt.UserRole, {
+                    "type": "workflow",
+                    "name": wf_name,
+                    "group": group,
+                    "alias": display_name,
+                    "id": workflow_id
+                })
                 group_item.addChild(wf_item)
                 
             self.saved_workflows_tree.addTopLevelItem(group_item)
@@ -1302,6 +1783,18 @@ class MainWindow(QMainWindow):
 
     def save_workflow_dialog(self):
         workflow_data = self.get_workflow_data()
+        if hasattr(self, "workflow_tree"):
+            print("[SaveDebug] GUI icon positions:")
+            setattr(self.workflow_tree, "debug_icon_logging", True)
+            self.workflow_tree.viewport().update()
+            QApplication.processEvents()
+            setattr(self.workflow_tree, "debug_icon_logging", False)
+        print("[SaveDebug] GUI view (display rows):")
+        self.debug_log_gui_view()
+        print("[SaveDebug] GUI tree structure:")
+        self.debug_log_gui_tree()
+        print("[SaveDebug] Steps before compute_logic_hierarchy:")
+        self.debug_log_steps(workflow_data)
         if not workflow_data:
             QMessageBox.warning(self, "警告", "无法保存空流程！")
             return
@@ -1310,14 +1803,29 @@ class MainWindow(QMainWindow):
         current_name = getattr(self, "current_workflow_name", None)
         current_group = getattr(self, "current_workflow_group", None)
         if current_name and current_group:
-            if self.workflow_manager.save_workflow(current_name, current_group, workflow_data):
-                # Ensure private element manager path aligns and persist any existing cache
+            display_name = current_name
+            if hasattr(self, "workflow_name_label"):
+                label_text = self.workflow_name_label.text().strip()
+                if label_text:
+                    display_name = label_text
+            workflow_id = getattr(self, "current_workflow_id", None)
+            if not workflow_id:
+                workflow_id = str(uuid.uuid4())
+                self.current_workflow_id = workflow_id
+            if self.workflow_manager.save_from_editor(current_name, current_group, workflow_id, display_name, workflow_data):
                 new_elements_path = os.path.join("workflows", current_group, f"{current_name}.elements.json")
                 current_data = self.private_element_manager._read_all()
-                self.private_element_manager.set_file_path(new_elements_path, load_now=False)
-                if current_data:
-                    self.private_element_manager._write_all(current_data)
-                QMessageBox.information(self, "成功", f"流程 {current_group}/{current_name} 已更新保存。")
+                if hasattr(self, "private_element_manager") and self.private_element_manager:
+                    self.private_element_manager.set_file_path(new_elements_path, load_now=False)
+                    self.private_element_manager.set_workflow_id(workflow_id)
+                    self.private_element_manager.set_workflow_name(display_name)
+                    if current_data:
+                        self.private_element_manager._write_all(current_data)
+                if hasattr(self, "workflow_name_label"):
+                    self.workflow_name_label.setText(display_name)
+                if hasattr(self, "workflow_name_edit"):
+                    self.workflow_name_edit.setText(display_name)
+                QMessageBox.information(self, "成功", f"流程 {current_group}/{display_name} 已保存。")
                 self.refresh_saved_workflows_list()
                 return
             else:
@@ -1335,7 +1843,14 @@ class MainWindow(QMainWindow):
         existing_groups = self.workflow_manager.get_all_groups()
         group_edit.addItems(existing_groups)
         if not existing_groups:
-             group_edit.addItem("Default")
+            group_edit.addItem("Default")
+        prefill_name = ""
+        if hasattr(self, "workflow_name_label"):
+            prefill_name = self.workflow_name_label.text().strip()
+        elif hasattr(self, "workflow_name_edit"):
+            prefill_name = self.workflow_name_edit.text().strip()
+        if prefill_name:
+            name_edit.setText(prefill_name)
         
         layout.addRow("流程名称:", name_edit)
         layout.addRow("分组:", group_edit)
@@ -1356,27 +1871,26 @@ class MainWindow(QMainWindow):
             if not name or not group:
                 QMessageBox.warning(self, "错误", "名称和分组不能为空！")
                 return
-                
-            if self.workflow_manager.save_workflow(name, group, workflow_data):
+            
+            workflow_id = str(uuid.uuid4())
+            file_key = workflow_id
+            if self.workflow_manager.save_from_editor(file_key, group, workflow_id, name, workflow_data):
                 # Update private element manager path to match new save location
-                new_elements_path = os.path.join("workflows", group, f"{name}.elements.json")
-                # If we were working with a temporary or different path, we should probably save current data to new path
-                # But ElementManager.set_file_path(path) just switches. 
-                # We should explicitly save current cache to the new path.
-                
-                # Check if we need to migrate data? 
-                # If self.private_element_manager already has data (from editing session), 
-                # we want to save it to the new file.
+                new_elements_path = os.path.join("workflows", group, f"{file_key}.elements.json")
                 current_data = self.private_element_manager._read_all()
-                self.private_element_manager.set_file_path(new_elements_path, load_now=False)
-                if current_data:
-                    self.private_element_manager._write_all(current_data)
+                if hasattr(self, "private_element_manager") and self.private_element_manager:
+                    self.private_element_manager.set_file_path(new_elements_path, load_now=False)
+                    self.private_element_manager.set_workflow_id(workflow_id)
+                    self.private_element_manager.set_workflow_name(name)
+                    if current_data:
+                        self.private_element_manager._write_all(current_data)
                 
                 QMessageBox.information(self, "成功", f"流程 {name} 保存成功！")
                 self.refresh_saved_workflows_list()
                 # Set current workflow identity for subsequent quick saves
-                self.current_workflow_name = name
+                self.current_workflow_name = file_key
                 self.current_workflow_group = group
+                self.current_workflow_id = workflow_id
             else:
                 QMessageBox.critical(self, "错误", "保存失败，请检查名称是否合法。")
 
@@ -1411,21 +1925,42 @@ class MainWindow(QMainWindow):
                     self.refresh_saved_workflows_list()
 
     def load_workflow(self, name, group):
-        workflow_data = self.workflow_manager.load_workflow(name, group)
-        if workflow_data:
-            self.create_undo_snapshot()
-            
-            # Setup private element manager
-            elements_path = os.path.join("workflows", group, f"{name}.elements.json")
-            self.private_element_manager.set_file_path(elements_path)
-            
-            self.workflow_tree.clear()
-            self.load_workflow_to_tree(workflow_data)
-            self.status_label.setText(f"已加载流程: {group}/{name}")
-            self.current_workflow_name = name
-            self.current_workflow_group = group
-            # After loading a workflow in editor, show back button if manager exists
-            self.btn_back.setVisible(bool(self.manager_ref))
+        raw_data = self.workflow_manager.load_for_editor(name, group)
+        if not raw_data:
+            return
+        if not isinstance(raw_data, dict):
+            return
+        display_name = name
+        workflow_data = raw_data.get("steps") or []
+        workflow_id = raw_data.get("id")
+        meta_name = raw_data.get("name")
+        if isinstance(meta_name, str) and meta_name.strip():
+            display_name = meta_name.strip()
+        if not isinstance(workflow_data, list):
+            workflow_data = []
+        if not workflow_id:
+            workflow_id = str(uuid.uuid4())
+        self.current_workflow_id = workflow_id
+        elements_path = os.path.join("workflows", group, f"{name}.elements.json")
+        self.private_element_manager.set_file_path(elements_path)
+        if hasattr(self, "private_element_manager") and self.private_element_manager:
+            self.private_element_manager.set_workflow_id(workflow_id)
+            self.private_element_manager.set_workflow_name(display_name)
+        
+        self.workflow_tree.clear()
+        self.load_workflow_to_tree(workflow_data)
+        self.status_label.setText(f"已加载流程: {group}/{display_name}")
+        self.current_workflow_name = name
+        self.current_workflow_group = group
+        if hasattr(self, "workflow_name_label"):
+            self.workflow_name_label.setText(display_name)
+        if hasattr(self, "workflow_name_edit"):
+            self.workflow_name_edit.setText(display_name)
+        self.undo_stack = []
+        self.redo_stack = []
+        self.btn_undo.setEnabled(False)
+        self.btn_redo.setEnabled(False)
+        self.btn_back.setVisible(bool(self.manager_ref))
     
     def handle_back_to_manager(self):
         if self.manager_ref:
@@ -1439,42 +1974,57 @@ class MainWindow(QMainWindow):
                 pass
         self.close()
 
+    def _compute_new_step_target(self):
+        target = None
+        indicator = None
+        if hasattr(self, "workflow_tree"):
+            target = self.workflow_tree.currentItem()
+            if target:
+                t_data = target.data(0, Qt.UserRole) or {}
+                t_name = t_data.get("tool_name")
+                if t_name == "EndMarker":
+                    parent = target.parent()
+                    if parent:
+                        idx = parent.indexOfChild(target)
+                        logic_item = parent.child(idx - 1) if idx > 0 else None
+                    else:
+                        idx = self.workflow_tree.indexOfTopLevelItem(target)
+                        logic_item = self.workflow_tree.topLevelItem(idx - 1) if idx > 0 else None
+                    if logic_item:
+                        target = logic_item
+                        indicator = QAbstractItemView.OnItem
+                elif t_name in LOGIC_TOOLS:
+                    indicator = QAbstractItemView.OnItem
+                else:
+                    parent = target.parent()
+                    if parent:
+                        p_data = parent.data(0, Qt.UserRole) or {}
+                        if p_data.get("tool_name") in LOGIC_TOOLS:
+                            indicator = QAbstractItemView.BelowItem
+                    if indicator is None:
+                        indicator = QAbstractItemView.BelowItem
+        return target, indicator
+
     def add_tool_to_workflow(self, item, column):
         data = item.data(0, Qt.UserRole)
         if data == "tool":
             tool_name = item.text(0)
-            target = None
-            indicator = None
-            if hasattr(self, "workflow_tree"):
-                target = self.workflow_tree.currentItem()
+            target, indicator = self._compute_new_step_target()
+            if tool_name == "End IF 标记":
                 if target:
-                    t_data = target.data(0, Qt.UserRole) or {}
-                    t_name = t_data.get("tool_name")
-                    if t_name == "EndMarker":
-                        parent = target.parent()
-                        if parent:
-                            idx = parent.indexOfChild(target)
-                            logic_item = parent.child(idx - 1) if idx > 0 else None
-                        else:
-                            idx = self.workflow_tree.indexOfTopLevelItem(target)
-                            logic_item = self.workflow_tree.topLevelItem(idx - 1) if idx > 0 else None
-                        if logic_item:
-                            target = logic_item
-                            indicator = QAbstractItemView.OnItem
-                    elif t_name in LOGIC_TOOLS:
-                        indicator = QAbstractItemView.OnItem
-                    else:
-                        parent = target.parent()
-                        if parent:
-                            p_data = parent.data(0, Qt.UserRole) or {}
-                            if p_data.get("tool_name") in LOGIC_TOOLS:
-                                indicator = QAbstractItemView.BelowItem
-                        if indicator is None:
-                            indicator = QAbstractItemView.BelowItem
-            if target:
-                self.add_step(tool_name, target, indicator)
+                    self.add_step("EndMarker", target, indicator, existing_params={"scope": "if"})
+                else:
+                    self.add_step("EndMarker", existing_params={"scope": "if"})
+            elif tool_name == "循环结束标记":
+                if target:
+                    self.add_step("EndMarker", target, indicator, existing_params={"scope": "loop"})
+                else:
+                    self.add_step("EndMarker", existing_params={"scope": "loop"})
             else:
-                self.add_step(tool_name)
+                if target:
+                    self.add_step(tool_name, target, indicator)
+                else:
+                    self.add_step(tool_name)
 
     def handle_toolbox_item_clicked(self, item, column):
         data = item.data(0, Qt.UserRole)
@@ -1488,10 +2038,21 @@ class MainWindow(QMainWindow):
                 indicator = QAbstractItemView.DropIndicatorPosition(indicator)
         except Exception:
             pass
-        if not target_item:
-            self.add_step(tool_name)
+        if tool_name == "End IF 标记":
+            if not target_item:
+                self.add_step("EndMarker", existing_params={"scope": "if"})
+            else:
+                self.add_step("EndMarker", target_item, indicator, existing_params={"scope": "if"})
+        elif tool_name == "循环结束标记":
+            if not target_item:
+                self.add_step("EndMarker", existing_params={"scope": "loop"})
+            else:
+                self.add_step("EndMarker", target_item, indicator, existing_params={"scope": "loop"})
         else:
-            self.add_step(tool_name, target_item, indicator)
+            if not target_item:
+                self.add_step(tool_name)
+            else:
+                self.add_step(tool_name, target_item, indicator)
 
     def handle_internal_move(self, item, target_item, indicator):
         try:
@@ -1500,104 +2061,68 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        if target_item:
-            data = target_item.data(0, Qt.UserRole)
-            if data and data.get("tool_name") == "EndMarker":
-                if indicator == QAbstractItemView.BelowItem:
-                    pass
-                else:
-                    parent = target_item.parent()
-                    index = parent.indexOfChild(target_item) if parent else self.workflow_tree.indexOfTopLevelItem(target_item)
-                    logic_tool = None
-                    if index > 0:
-                        if parent:
-                            logic_tool = parent.child(index - 1)
-                        else:
-                            logic_tool = self.workflow_tree.topLevelItem(index - 1)
-                    if logic_tool:
-                        target_item = logic_tool
-                        indicator = QAbstractItemView.OnItem
-
         if target_item and indicator == QAbstractItemView.OnItem:
             t_data = target_item.data(0, Qt.UserRole)
             t_name = t_data.get("tool_name") if t_data else None
             if t_name and t_name not in LOGIC_TOOLS:
                 indicator = QAbstractItemView.BelowItem
 
-        end_marker_to_move = None
-        item_data = item.data(0, Qt.UserRole)
-        if item_data and item_data.get("tool_name") in LOGIC_TOOLS:
-            parent = item.parent()
-            index = parent.indexOfChild(item) if parent else self.workflow_tree.indexOfTopLevelItem(item)
-            next_sibling = None
-            if parent:
-                if index + 1 < parent.childCount():
-                    next_sibling = parent.child(index + 1)
-            else:
-                if index + 1 < self.workflow_tree.topLevelItemCount():
-                    next_sibling = self.workflow_tree.topLevelItem(index + 1)
-            if next_sibling:
-                ns_data = next_sibling.data(0, Qt.UserRole)
-                if ns_data and ns_data.get("tool_name") == "EndMarker":
-                    end_marker_to_move = next_sibling
+        source_data = item.data(0, Qt.UserRole) or {}
+        source_name = source_data.get("tool_name")
+        if source_name in ("Else If 条件", "Else 否则") and target_item:
+            t_data = target_item.data(0, Qt.UserRole) or {}
+            t_name = t_data.get("tool_name")
+            parent = target_item.parent()
+            if t_name == "If 条件":
+                indicator = QAbstractItemView.BelowItem
+            elif t_name in ("Else If 条件", "Else 否则"):
+                indicator = QAbstractItemView.BelowItem
+            elif parent:
+                p_data = parent.data(0, Qt.UserRole) or {}
+                if p_data.get("tool_name") == "If 条件":
+                    target_item = parent
+                    indicator = QAbstractItemView.BelowItem
 
+        self.create_undo_snapshot()
         current_parent = item.parent()
         if current_parent:
             current_parent.removeChild(item)
-            if end_marker_to_move:
-                current_parent.removeChild(end_marker_to_move)
         else:
             index = self.workflow_tree.indexOfTopLevelItem(item)
-            self.workflow_tree.takeTopLevelItem(index)
-            if end_marker_to_move:
-                em_index = self.workflow_tree.indexOfTopLevelItem(end_marker_to_move)
-                if em_index != -1:
-                    self.workflow_tree.takeTopLevelItem(em_index)
+            if index != -1:
+                self.workflow_tree.takeTopLevelItem(index)
 
         if target_item:
             parent = target_item.parent()
             if indicator == QAbstractItemView.OnItem:
                 target_item.addChild(item)
                 target_item.setExpanded(True)
-                if end_marker_to_move:
-                    target_item.addChild(end_marker_to_move)
             elif indicator == QAbstractItemView.AboveItem:
                 if parent:
                     index = parent.indexOfChild(target_item)
                     parent.insertChild(index, item)
-                    if end_marker_to_move:
-                        parent.insertChild(index + 1, end_marker_to_move)
                 else:
                     index = self.workflow_tree.indexOfTopLevelItem(target_item)
                     self.workflow_tree.insertTopLevelItem(index, item)
-                    if end_marker_to_move:
-                        self.workflow_tree.insertTopLevelItem(index + 1, end_marker_to_move)
             elif indicator == QAbstractItemView.BelowItem:
                 if parent:
                     index = parent.indexOfChild(target_item)
                     parent.insertChild(index + 1, item)
-                    if end_marker_to_move:
-                        parent.insertChild(index + 2, end_marker_to_move)
                 else:
                     index = self.workflow_tree.indexOfTopLevelItem(target_item)
                     self.workflow_tree.insertTopLevelItem(index + 1, item)
-                    if end_marker_to_move:
-                        self.workflow_tree.insertTopLevelItem(index + 2, end_marker_to_move)
         else:
             self.workflow_tree.addTopLevelItem(item)
-            if end_marker_to_move:
-                self.workflow_tree.addTopLevelItem(end_marker_to_move)
-        self.create_undo_snapshot()
     def add_step(self, tool_name, target_item=None, indicator=None, existing_params=None):
         tool_cls = ENGINE_REGISTRY.get(tool_name)
-        if not tool_cls:
+        if not tool_cls and tool_name != "EndMarker":
             return
         try:
             if isinstance(indicator, int):
                 indicator = QAbstractItemView.DropIndicatorPosition(indicator)
         except Exception:
             pass
-        schema = tool_cls().get_param_schema()
+        schema = tool_cls().get_param_schema() if tool_cls else None
         params = existing_params or {}
         if schema and existing_params is None:
             extra_context = {
@@ -1631,8 +2156,25 @@ class MainWindow(QMainWindow):
             t_name = t_data.get("tool_name") if t_data else None
             if t_name and t_name not in LOGIC_TOOLS:
                 indicator = QAbstractItemView.BelowItem
+
+        if tool_name in ("Else If 条件", "Else 否则") and target_item:
+            t_data = target_item.data(0, Qt.UserRole) or {}
+            t_name = t_data.get("tool_name")
+            parent = target_item.parent()
+            if t_name == "If 条件":
+                indicator = QAbstractItemView.BelowItem
+            elif t_name in ("Else If 条件", "Else 否则"):
+                indicator = QAbstractItemView.BelowItem
+            elif parent:
+                p_data = parent.data(0, Qt.UserRole) or {}
+                if p_data.get("tool_name") == "If 条件":
+                    target_item = parent
+                    indicator = QAbstractItemView.BelowItem
+
+        self.create_undo_snapshot()
+        tool_id = TOOL_NAME_TO_ID.get(tool_name, tool_name)
         item = QTreeWidgetItem([tool_name])
-        item.setData(0, Qt.UserRole, {"tool_name": tool_name, "params": params})
+        item.setData(0, Qt.UserRole, {"tool_id": tool_id, "tool_name": tool_name, "params": params})
         if target_item:
             parent = target_item.parent()
             if indicator == QAbstractItemView.OnItem:
@@ -1655,71 +2197,120 @@ class MainWindow(QMainWindow):
                     index = self.workflow_tree.indexOfTopLevelItem(target_item)
                     self.workflow_tree.insertTopLevelItem(index + 1, item)
         else:
-            self.workflow_tree.addTopLevelItem(item)
+            root = self.workflow_tree.invisibleRootItem()
+            placeholder = getattr(self, "add_step_placeholder_item", None)
+            if placeholder and placeholder.parent() is root:
+                idx = root.indexOfChild(placeholder)
+                if idx == -1:
+                    self.workflow_tree.addTopLevelItem(item)
+                else:
+                    root.insertChild(idx, item)
+            else:
+                self.workflow_tree.addTopLevelItem(item)
         if tool_name in LOGIC_TOOLS:
             item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
-            end_item = QTreeWidgetItem([f"结束 {tool_name}"])
-            end_item.setData(0, Qt.UserRole, {"tool_name": "EndMarker", "params": {}})
-            end_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-            parent = item.parent()
-            if parent:
-                index = parent.indexOfChild(item)
-                parent.insertChild(index + 1, end_item)
-            else:
-                index = self.workflow_tree.indexOfTopLevelItem(item)
-                self.workflow_tree.insertTopLevelItem(index + 1, end_item)
+            end_text = None
+            end_params = {}
+            if tool_name in ("For循环", "Foreach循环", "Foreach字典循环", "While循环"):
+                end_text = "循环体结束"
+                end_params = {"scope": "loop"}
+            elif tool_name == "If 条件":
+                end_text = "End IF"
+                end_params = {"scope": "if"}
+            if end_text:
+                end_item = QTreeWidgetItem([end_text])
+                end_item.setData(0, Qt.UserRole, {"tool_name": "EndMarker", "params": end_params})
+                end_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                parent = item.parent()
+                if parent:
+                    index = parent.indexOfChild(item)
+                    parent.insertChild(index + 1, end_item)
+                else:
+                    index = self.workflow_tree.indexOfTopLevelItem(item)
+                    self.workflow_tree.insertTopLevelItem(index + 1, end_item)
             item.setExpanded(True)
-        self.create_undo_snapshot()
         self.refresh_logic_visibility()
 
     def show_context_menu(self, pos):
         item = self.workflow_tree.itemAt(pos)
         if not item:
             return
+        selected_items = self.workflow_tree.selectedItems()
+        if not selected_items:
+            selected_items = [item]
         data = item.data(0, Qt.UserRole)
-        if data and data.get("tool_name") == "EndMarker":
-            return
         menu = QMenu(self)
-        edit_action = menu.addAction("编辑参数")
-        delete_action = menu.addAction("删除步骤")
-        disabled = (data or {}).get("disabled", False)
-        toggle_disable_action = menu.addAction("启用步骤" if disabled else "禁用步骤")
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #FFFFFF;
+                border: 1px solid #E4E7ED;
+                border-radius: 6px;
+                padding: 4px 0;
+            }
+            QMenu::item {
+                padding: 6px 24px;
+                background-color: transparent;
+            }
+            QMenu::item:selected {
+                background-color: #ECF5FF;
+                color: #409EFF;
+            }
+        """)
+        copy_action = menu.addAction("复制步骤 (Ctrl+C)")
+        cut_action = menu.addAction("剪切步骤 (Ctrl+X)")
+        paste_action = menu.addAction("粘贴步骤 (Ctrl+V)")
+        menu.addSeparator()
+        undo_action = menu.addAction("撤销 (Ctrl+Z)")
+        redo_action = menu.addAction("重做 (Ctrl+Y)")
+        menu.addSeparator()
+        select_all_action = menu.addAction("全选 (Ctrl+A)")
+        save_action = menu.addAction("保存 (Ctrl+S)")
+        menu.addSeparator()
+        delete_title = "删除步骤" if len(selected_items) == 1 else f"删除步骤 ({len(selected_items)})"
+        delete_action = menu.addAction(delete_title)
+        base_disabled_all = True
+        for it in selected_items:
+            d_it = it.data(0, Qt.UserRole) or {}
+            if not d_it.get("disabled", False):
+                base_disabled_all = False
+                break
+        toggle_disable_text = "启用步骤" if base_disabled_all else "禁用步骤"
+        toggle_disable_action = menu.addAction(toggle_disable_text + " (Ctrl+/)")
+        has_clipboard = bool(getattr(self, "_clipboard_steps", None))
+        paste_action.setEnabled(has_clipboard)
+        undo_action.setEnabled(len(self.undo_stack) > 0)
+        redo_action.setEnabled(len(self.redo_stack) > 0)
         action = menu.exec(self.workflow_tree.mapToGlobal(pos))
-        if action == edit_action:
-            self.edit_step(item)
+        if action == copy_action:
+            self.copy_selected_steps()
+        elif action == cut_action:
+            self.cut_selected_steps()
+        elif action == paste_action:
+            self.paste_steps()
+        elif action == undo_action:
+            self.perform_undo()
+        elif action == redo_action:
+            self.perform_redo()
+        elif action == select_all_action:
+            self.select_all_steps()
+        elif action == save_action:
+            self.save_workflow_dialog()
         elif action == delete_action:
             self.create_undo_snapshot()
-            parent = item.parent()
-            data = item.data(0, Qt.UserRole) or {}
-            name = data.get("tool_name")
-            if parent:
-                if name in LOGIC_TOOLS:
-                    idx = parent.indexOfChild(item)
-                    if idx + 1 < parent.childCount():
-                        sib = parent.child(idx + 1)
-                        sdata = sib.data(0, Qt.UserRole) or {}
-                        if sdata.get("tool_name") == "EndMarker":
-                            parent.removeChild(sib)
-                parent.removeChild(item)
-            else:
-                if name in LOGIC_TOOLS:
-                    idx = self.workflow_tree.indexOfTopLevelItem(item)
-                    if idx + 1 < self.workflow_tree.topLevelItemCount():
-                        sib = self.workflow_tree.topLevelItem(idx + 1)
-                        sdata = sib.data(0, Qt.UserRole) or {}
-                        if sdata.get("tool_name") == "EndMarker":
-                            em_idx = self.workflow_tree.indexOfTopLevelItem(sib)
-                            if em_idx != -1:
-                                self.workflow_tree.takeTopLevelItem(em_idx)
-                idx = self.workflow_tree.indexOfTopLevelItem(item)
-                if idx != -1:
-                    self.workflow_tree.takeTopLevelItem(idx)
+            for it in selected_items:
+                d = it.data(0, Qt.UserRole) or {}
+                name = d.get("tool_name")
+                if not name:
+                    continue
+                parent = it.parent()
+                if parent:
+                    parent.removeChild(it)
+                else:
+                    idx = self.workflow_tree.indexOfTopLevelItem(it)
+                    if idx != -1:
+                        self.workflow_tree.takeTopLevelItem(idx)
         elif action == toggle_disable_action:
-            self.create_undo_snapshot()
-            d = item.data(0, Qt.UserRole) or {}
-            d["disabled"] = not d.get("disabled", False)
-            item.setData(0, Qt.UserRole, d)
-            self.workflow_tree.viewport().update()
+            self.toggle_disable_for_selected(base_disabled_all)
 
     def edit_step(self, item):
         data = item.data(0, Qt.UserRole)
@@ -1751,9 +2342,190 @@ class MainWindow(QMainWindow):
 
     def handle_item_expanded(self, item):
         self.refresh_logic_visibility()
+
+    def start_quick_add_mode(self):
+        if hasattr(self, "quick_add_stack") and hasattr(self, "quick_add_edit"):
+            self.quick_add_edit.clear()
+            self.quick_add_stack.setCurrentWidget(self.quick_add_edit)
+            self.quick_add_edit.setVisible(True)
+            self.quick_add_edit.setFocus()
+        self.show_add_step_popup()
+
+    def apply_quick_add_from_inline(self):
+        text = ""
+        if hasattr(self, "quick_add_edit"):
+            text = self.quick_add_edit.text().strip()
+        if text and text in TOOL_NAME_TO_ID:
+            target, indicator = self._compute_new_step_target()
+            if target:
+                self.add_step(text, target, indicator)
+            else:
+                self.add_step(text)
+        if hasattr(self, "quick_add_stack") and hasattr(self, "btn_quick_add_step"):
+            self.quick_add_stack.setCurrentWidget(self.btn_quick_add_step)
+            self.quick_add_edit.setVisible(False)
+
+    def show_add_step_popup(self):
+        dlg = QDialog(self)
+        dlg.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint)
+        dlg.setStyleSheet("""
+            QDialog {
+                background-color: #FFFFFF;
+                border-radius: 4px;
+                border: 1px solid #E4E7ED;
+            }
+            QListWidget {
+                border: none;
+                outline: none;
+            }
+            QListWidget::item {
+                padding: 6px 12px;
+            }
+            QListWidget::item:selected {
+                background-color: #ECF5FF;
+            }
+        """)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        list_widget = QListWidget()
+        layout.addWidget(list_widget)
+
+        recommended_tools = ["If 条件", "等待", "点击元素", "设置变量", "打印日志"]
+        all_tools = []
+        for cat, tools in TOOL_CATEGORIES.items():
+            for display_name in tools.keys():
+                all_tools.append(display_name)
+
+        def refresh_list(keyword=""):
+            list_widget.clear()
+            kw = keyword.strip().lower()
+            source = all_tools if kw else recommended_tools
+            seen = set()
+            for name in source:
+                if name in seen:
+                    continue
+                seen.add(name)
+                if kw and kw not in name.lower():
+                    continue
+                item = QListWidgetItem(name)
+                list_widget.addItem(item)
+
+        keyword_init = ""
+        if hasattr(self, "quick_add_edit"):
+            keyword_init = self.quick_add_edit.text()
+        refresh_list(keyword_init)
+
+        def apply_from_selection(item):
+            if not item:
+                return
+            tool_name = item.text()
+            dlg.accept()
+            target, indicator = self._compute_new_step_target()
+            if target:
+                self.add_step(tool_name, target, indicator)
+            else:
+                self.add_step(tool_name)
+
+        list_widget.itemClicked.connect(apply_from_selection)
+
+        if hasattr(self, "quick_add_edit"):
+            def on_inline_changed(text):
+                refresh_list(text)
+            self.quick_add_edit.textChanged.connect(on_inline_changed)
+
+        dlg.adjustSize()
+        if hasattr(self, "btn_quick_add_step"):
+            btn = self.btn_quick_add_step
+            global_pos = btn.mapToGlobal(btn.rect().topLeft())
+            dlg.move(global_pos.x(), global_pos.y() - dlg.height() - 4)
+
+        dlg.exec()
+
+        if hasattr(self, "quick_add_stack") and hasattr(self, "btn_quick_add_step"):
+            self.quick_add_stack.setCurrentWidget(self.btn_quick_add_step)
+            self.quick_add_edit.setVisible(False)
+
+    def debug_log_gui_tree(self):
+        if not hasattr(self, "workflow_tree"):
+            return
+        root = self.workflow_tree.invisibleRootItem()
+
+        def walk(parent, depth):
+            for i in range(parent.childCount()):
+                item = parent.child(i)
+                data = item.data(0, Qt.UserRole) or {}
+                name = data.get("tool_name")
+                params = data.get("params") or {}
+                scope = None
+                if isinstance(params, dict):
+                    scope = params.get("scope")
+                indent = "  " * depth
+                child_count = item.childCount()
+                print(f"[GUI-Tree] {indent}- name={name}, scope={scope}, children={child_count}")
+                walk(item, depth + 1)
+
+        print("[GUI-Tree] begin")
+        walk(root, 0)
+        print("[GUI-Tree] end")
+
+    def debug_log_gui_view(self):
+        if not hasattr(self, "workflow_tree"):
+            return
+        root = self.workflow_tree.invisibleRootItem()
+
+        def walk(parent, depth):
+            for i in range(parent.childCount()):
+                item = parent.child(i)
+                data = item.data(0, Qt.UserRole) or {}
+                name = data.get("tool_name")
+                params = data.get("params") or {}
+                scope = None
+                if isinstance(params, dict):
+                    scope = params.get("scope")
+                indent = "  " * depth
+                child_count = item.childCount()
+                text = item.text(0)
+                expanded = bool(item.isExpanded())
+                hidden = bool(item.isHidden())
+                index = self.workflow_tree.indexFromItem(item, 0)
+                rect = self.workflow_tree.visualRect(index)
+                row_left = rect.left()
+                indent_px = depth * self.workflow_tree.indentation()
+                icon_x = row_left + indent_px
+                print(f"[GUI-View] {indent}- text={text}, name={name}, scope={scope}, depth={depth}, row_left={row_left}, icon_x={icon_x}, indent_px={indent_px}, children={child_count}, expanded={expanded}, hidden={hidden}")
+                walk(item, depth + 1)
+
+        print("[GUI-View] begin")
+        walk(root, 0)
+        print("[GUI-View] end")
+
+    def debug_log_steps(self, steps):
+        def walk(step_list, depth):
+            for step in step_list:
+                if not isinstance(step, dict):
+                    continue
+                name = step.get("tool_name")
+                params = step.get("params") or {}
+                scope = None
+                if isinstance(params, dict):
+                    scope = params.get("scope")
+                children = step.get("children") or []
+                indent = "  " * depth
+                print(f"[Steps] {indent}- name={name}, scope={scope}, children={len(children)}")
+                if children:
+                    walk(children, depth + 1)
+
+        print("[Steps] begin")
+        if isinstance(steps, list):
+            walk(steps, 0)
+        print("[Steps] end")
+
     def get_workflow_data(self):
-        self._line_counter = 0
-        return self.get_items_data(self.workflow_tree.invisibleRootItem())
+        steps = self.get_items_data(self.workflow_tree.invisibleRootItem())
+        return steps
 
     def get_items_data(self, parent_item):
         steps = []
@@ -1761,40 +2533,70 @@ class MainWindow(QMainWindow):
             item = parent_item.child(i)
             data = item.data(0, Qt.UserRole) or {}
             tool_name = data.get("tool_name")
-            line = None
-            if hasattr(self, "_line_counter"):
-                self._line_counter += 1
-                line = self._line_counter
+            tool_id = data.get("tool_id")
+            if not tool_id and tool_name:
+                tool_id = TOOL_NAME_TO_ID.get(tool_name, tool_name)
             step_data = {
+                "id": tool_id,
                 "tool_name": tool_name,
                 "params": data.get("params", {}),
                 "disabled": bool(data.get("disabled", False)),
+                "expanded": bool(item.isExpanded()),
                 "children": self.get_items_data(item)
             }
-            if line is not None:
-                step_data["line"] = line
             steps.append(step_data)
         return steps
+
+    def _attach_logic_children(self, steps):
+        return compute_logic_hierarchy(steps)
 
     def refresh_logic_visibility(self):
         root = self.workflow_tree.invisibleRootItem()
 
         def process(parent):
-            stack = []
+            loop_stack = []
+            collapsed_if_block = False
+            collapsed_else_block = False
             for i in range(parent.childCount()):
                 it = parent.child(i)
                 d = it.data(0, Qt.UserRole) or {}
                 name = d.get("tool_name")
-                hidden = any(not logic.isExpanded() for logic in stack)
-                if name in LOGIC_TOOLS:
-                    it.setHidden(hidden)
-                    stack.append(it)
-                elif name == "EndMarker":
-                    it.setHidden(hidden)
-                    if stack:
-                        stack.pop()
-                else:
-                    it.setHidden(hidden)
+                params = d.get("params") or {}
+                scope = params.get("scope")
+
+                hidden_by_stack = any(not logic.isExpanded() for logic in loop_stack)
+                hidden = hidden_by_stack
+
+                is_if_header = name == "If 条件"
+                is_else_header = name in ("Else If 条件", "Else 否则")
+                is_if_end = name == "EndMarker" and scope == "if"
+                is_else_boundary = is_else_header or is_if_end
+                is_if_boundary = is_if_header or is_else_boundary
+
+                if not hidden and not is_if_boundary and collapsed_if_block:
+                    hidden = True
+                if not hidden and not is_else_boundary and collapsed_else_block:
+                    hidden = True
+
+                it.setHidden(hidden)
+
+                if is_if_header:
+                    collapsed_if_block = False
+                    collapsed_else_block = False
+                    if not hidden and not it.isExpanded():
+                        collapsed_if_block = True
+
+                if is_else_boundary:
+                    collapsed_else_block = False
+                    collapsed_if_block = False
+                    if is_else_header and not hidden and not it.isExpanded():
+                        collapsed_else_block = True
+
+                if name in ("For循环", "Foreach循环", "Foreach字典循环", "While循环"):
+                    loop_stack.append(it)
+                elif name == "EndMarker" and scope == "loop":
+                    if loop_stack:
+                        loop_stack.pop()
             for i in range(parent.childCount()):
                 child = parent.child(i)
                 if child.childCount() > 0:
@@ -1811,24 +2613,48 @@ class MainWindow(QMainWindow):
             parent_item = self.workflow_tree.invisibleRootItem()
             
         for step in workflow_data:
-            if step.get("tool_name") == "EndMarker":
+            tool_id = step.get("id") or step.get("tool_id")
+            tool_name = step.get("tool_name")
+            if not tool_name and tool_id:
+                tool_name = TOOL_ID_TO_NAME.get(tool_id, tool_id)
+            if not tool_name:
                 continue
-            item = QTreeWidgetItem([step["tool_name"]])
-            item.setData(0, Qt.UserRole, {"tool_name": step["tool_name"], "params": step["params"]})
-            if step["tool_name"] in LOGIC_TOOLS:
+            params = step.get("params", {}) or {}
+            display_name = tool_name
+            if tool_name == "EndMarker":
+                scope = params.get("scope")
+                if scope == "if":
+                    display_name = "End IF"
+                elif scope in (None, "loop"):
+                    display_name = "循环体结束"
+                else:
+                    display_name = "EndMarker"
+            item = QTreeWidgetItem([display_name])
+            item.setData(0, Qt.UserRole, {
+                "tool_id": tool_id or TOOL_NAME_TO_ID.get(tool_name, tool_name),
+                "tool_name": tool_name,
+                "params": params,
+                "disabled": bool(step.get("disabled", False))
+            })
+            if tool_name in LOGIC_TOOLS:
                 item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
             parent_item.addChild(item)
             
-            if step.get("children"):
-                self.load_workflow_to_tree(step["children"], item)
-                
-            if step["tool_name"] in LOGIC_TOOLS:
-                end_item = QTreeWidgetItem([f"结束 {step['tool_name']}"])
-                end_item.setData(0, Qt.UserRole, {"tool_name": "EndMarker", "params": {}})
-                end_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
-                parent_item.addChild(end_item)
+            loop_tools = {"For循环", "Foreach循环", "Foreach字典循环", "While循环"}
+            if_tools = {"If 条件", "Else If 条件", "Else 否则"}
+            children_for_tree = []
+            if tool_name in loop_tools and isinstance(params.get("children"), list):
+                children_for_tree = params.get("children") or []
+            elif tool_name in if_tools and isinstance(params.get("children"), list):
+                children_for_tree = params.get("children") or []
+            elif step.get("children"):
+                children_for_tree = step.get("children") or []
+
+            if children_for_tree:
+                self.load_workflow_to_tree(children_for_tree, item)
             
-            item.setExpanded(True)
+            expanded = step.get("expanded", True)
+            item.setExpanded(bool(expanded))
         self.refresh_logic_visibility()
 
     def toggle_schedule(self):
@@ -1871,13 +2697,19 @@ class MainWindow(QMainWindow):
         # This runs in background thread by APScheduler
         try:
             logging.info("Starting scheduled workflow...")
-            self.engine.load_workflow(workflow_data, ENGINE_REGISTRY)
+            normalized = compute_logic_hierarchy(workflow_data, strict=True)
+            self.engine.load_workflow(normalized, ENGINE_REGISTRY)
             self.engine.run()
         except Exception as e:
             logging.error(f"Scheduled Run Error: {e}")
 
     def run_workflow(self):
         workflow_data = self.get_workflow_data()
+        try:
+            workflow_data = compute_logic_hierarchy(workflow_data, strict=True)
+        except Exception as e:
+            QMessageBox.critical(self, "流程错误", str(e))
+            return
         if not workflow_data:
             QMessageBox.warning(self, "提示", "流程为空！")
             return
@@ -2134,14 +2966,21 @@ class FlowManagerWindow(QMainWindow):
         # Workflow List (Table)
         self.wf_table = WorkflowTable()
         self.wf_table.setColumnCount(3)
-        self.wf_table.setHorizontalHeaderLabels(["应用名称", "更新时间", "状态"])
+        self.wf_header_labels = ["工作流名称", "更新时间", "状态"]
+        self.wf_table.setHorizontalHeaderLabels(self.wf_header_labels)
+        header_item_time = self.wf_table.horizontalHeaderItem(1)
+        if header_item_time:
+            header_item_time.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         
         # Table Header Styling
         header = self.wf_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
         header.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        header.resizeSection(1, 140)
+        header.setSortIndicatorShown(False)
+        header.sectionClicked.connect(self.on_wf_header_clicked)
         
         self.wf_table.verticalHeader().setVisible(False)
         self.wf_table.verticalHeader().setDefaultSectionSize(68) # Force row height
@@ -2151,6 +2990,7 @@ class FlowManagerWindow(QMainWindow):
         self.wf_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.wf_table.setSortingEnabled(True)
         self.wf_table.horizontalHeader().setSortIndicator(1, Qt.DescendingOrder)
+        self.update_wf_header_sort_label(1, Qt.DescendingOrder)
         
         # Apply Delegate BEFORE refresh
         self.wf_table.setItemDelegate(WorkflowItemDelegate(self.wf_table))
@@ -2172,7 +3012,7 @@ class FlowManagerWindow(QMainWindow):
                 border: none; 
                 border-bottom: 1px solid #EBEEF5; 
                 color: #909399; 
-                padding: 10px 20px; 
+                padding: 10px 20px 10px 20px; 
                 font-weight: normal; 
             }
         """)
@@ -2197,9 +3037,13 @@ class FlowManagerWindow(QMainWindow):
         for group, names in workflows.items():
             for name in names:
                 self.wf_table.insertRow(row)
-                
-                # Name Item
-                name_item = QTableWidgetItem(name)
+                display_name = name
+                raw = self.workflow_manager.load_workflow(name, group)
+                if isinstance(raw, dict):
+                    meta_name = raw.get("name")
+                    if isinstance(meta_name, str) and meta_name.strip():
+                        display_name = meta_name.strip()
+                name_item = QTableWidgetItem(display_name)
                 name_item.setData(Qt.UserRole, {"name": name, "group": group})
                 self.wf_table.setItem(row, 0, name_item)
                 
@@ -2215,6 +3059,7 @@ class FlowManagerWindow(QMainWindow):
                     pass
                 time_item = QTableWidgetItem(time_str)
                 time_item.setForeground(QColor("#909399"))
+                time_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.wf_table.setItem(row, 1, time_item)
                 
                 # Status Item
@@ -2227,7 +3072,32 @@ class FlowManagerWindow(QMainWindow):
         
         # Re-enable sorting and apply default sort
         self.wf_table.setSortingEnabled(True)
-        self.wf_table.horizontalHeader().setSortIndicator(1, Qt.DescendingOrder)
+        header = self.wf_table.horizontalHeader()
+        header.setSortIndicator(1, Qt.DescendingOrder)
+        self.update_wf_header_sort_label(1, Qt.DescendingOrder)
+
+    def update_wf_header_sort_label(self, col, order):
+        if not hasattr(self, "wf_header_labels"):
+            return
+        for i in range(self.wf_table.columnCount()):
+            item = self.wf_table.horizontalHeaderItem(i)
+            if not item:
+                continue
+            base = self.wf_header_labels[i]
+            if i == col:
+                suffix = " ↓" if order == Qt.DescendingOrder else " ↑"
+                item.setText(base + suffix)
+            else:
+                item.setText(base)
+        item_time = self.wf_table.horizontalHeaderItem(1)
+        if item_time:
+            item_time.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+    def on_wf_header_clicked(self, logicalIndex):
+        header = self.wf_table.horizontalHeader()
+        col = header.sortIndicatorSection()
+        order = header.sortIndicatorOrder()
+        self.update_wf_header_sort_label(col, order)
 
     def on_table_double_click(self, row, col):
         item = self.wf_table.item(row, 0)
