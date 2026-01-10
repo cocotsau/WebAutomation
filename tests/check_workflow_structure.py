@@ -18,13 +18,10 @@ def build_tree_view(steps):
         name = step.get("tool_name")
         params = step.get("params") or {}
         children_for_tree = []
-        if_tools = {"If 条件", "Else If 条件", "Else 否则"}
-        if name in LOGIC_LOOP_TOOLS and isinstance(params.get("children"), list):
-            children_for_tree = params.get("children") or []
-        elif name in if_tools and isinstance(params.get("children"), list):
-            children_for_tree = params.get("children") or []
-        elif isinstance(step.get("children"), list):
+        if isinstance(step.get("children"), list):
             children_for_tree = step.get("children") or []
+        elif isinstance(params.get("children"), list):
+            children_for_tree = params.get("children") or []
         step["children"] = build_tree_view(children_for_tree)
         result.append(step)
     return result

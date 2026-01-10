@@ -2688,15 +2688,11 @@ class MainWindow(QMainWindow):
                 item.setChildIndicatorPolicy(QTreeWidgetItem.ShowIndicator)
             parent_item.addChild(item)
             
-            loop_tools = {"For循环", "Foreach循环", "Foreach字典循环", "While循环"}
-            if_tools = {"If 条件", "Else If 条件", "Else 否则"}
             children_for_tree = []
-            if tool_name in loop_tools and isinstance(params.get("children"), list):
-                children_for_tree = params.get("children") or []
-            elif tool_name in if_tools and isinstance(params.get("children"), list):
-                children_for_tree = params.get("children") or []
-            elif step.get("children"):
+            if isinstance(step.get("children"), list):
                 children_for_tree = step.get("children") or []
+            elif isinstance(params.get("children"), list):
+                children_for_tree = params.get("children") or []
 
             if children_for_tree:
                 self.load_workflow_to_tree(children_for_tree, item)

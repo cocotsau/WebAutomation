@@ -101,23 +101,27 @@ def compute_logic_hierarchy(steps, strict: bool = False):
                 params = {}
             step["params"] = params
 
-            if name in LOGIC_LOOP_TOOLS or name in if_tools:
-                children_source: List[Dict[str, Any]] = []
-                if isinstance(params.get("children"), list):
-                    children_source = params.get("children") or []
-                elif isinstance(step.get("children"), list):
-                    children_source = step.get("children") or []
-                normalized_children = normalize(children_source) if children_source else []
-                params["children"] = normalized_children
-                step["params"] = params
-                if isinstance(step.get("children"), list):
-                    step["children"] = []
+            children_from_step: List[Dict[str, Any]] = []
+            if isinstance(step.get("children"), list):
+                children_from_step = step.get("children") or []
+            children_from_param: List[Dict[str, Any]] = []
+            if isinstance(params.get("children"), list):
+                children_from_param = params.get("children") or []
+
+            if children_from_step and children_from_param:
+                children_source = children_from_step
             else:
-                if isinstance(params.get("children"), list):
-                    params["children"] = normalize(params.get("children") or [])
-                    step["params"] = params
-                if isinstance(step.get("children"), list):
-                    step["children"] = normalize(step.get("children") or [])
+                children_source = children_from_step or children_from_param
+
+            normalized_children: List[Dict[str, Any]] = []
+            if children_source:
+                normalized_children = normalize(children_source)
+
+            step["children"] = normalized_children
+            if "children" in params:
+                params.pop("children", None)
+            step["params"] = params
+
             result.append(step)
         return result
 
@@ -148,10 +152,10 @@ def compute_logic_hierarchy(steps, strict: bool = False):
                             step["params"] = params
                         logic_stack.pop()
                 children: List[Dict[str, Any]] = []
-                if name in LOGIC_LOOP_TOOLS and isinstance(params.get("children"), list):
-                    children = params.get("children") or []
-                elif isinstance(step.get("children"), list):
+                if isinstance(step.get("children"), list):
                     children = step.get("children") or []
+                elif isinstance(params.get("children"), list):
+                    children = params.get("children") or []
                 if children:
                     walk(children)
 
@@ -179,12 +183,8 @@ def compute_logic_hierarchy(steps, strict: bool = False):
                 children: List[Dict[str, Any]] = []
                 if isinstance(step.get("children"), list):
                     children = step.get("children") or []
-                if name in LOGIC_LOOP_TOOLS and isinstance(params.get("children"), list):
-                    children = params.get("children") or children
-                if name in if_tools and isinstance(params.get("children"), list):
-                    extra_children = params.get("children") or []
-                    if extra_children:
-                        children = (children or []) + extra_children
+                elif isinstance(params.get("children"), list):
+                    children = params.get("children") or []
                 if children:
                     validate_if_blocks(children)
 
@@ -205,12 +205,10 @@ def compute_logic_hierarchy(steps, strict: bool = False):
             if not isinstance(params, dict):
                 params = {}
             children: List[Dict[str, Any]] = []
-            if name in LOGIC_LOOP_TOOLS and isinstance(params.get("children"), list):
-                children = params.get("children") or []
-            elif name in if_tools and isinstance(params.get("children"), list):
-                children = params.get("children") or []
-            elif isinstance(step.get("children"), list):
+            if isinstance(step.get("children"), list):
                 children = step.get("children") or []
+            elif isinstance(params.get("children"), list):
+                children = params.get("children") or []
             if children:
                 assign_lines(children)
 
@@ -310,6 +308,8 @@ class WorkflowManager:
                 params = s.get("params")
                 if isinstance(params, dict) and isinstance(params.get("children"), list):
                     strip_lines(params["children"])
+                    params.pop("children", None)
+                    s["params"] = params
                 if isinstance(s.get("children"), list):
                     strip_lines(s["children"])
 
